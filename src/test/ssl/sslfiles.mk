@@ -9,7 +9,7 @@
 #   The main Makefile in this directory defers to this helper file when
 #   building the sslfiles-related targets.
 #
-# Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+# Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
 #
 # src/test/ssl/sslfiles.mk
@@ -22,12 +22,18 @@
 # key/certificate pair will be generated for you, signed by the appropriate CA.
 #
 SERVERS := server-cn-and-alt-names \
+	server-cn-and-ip-alt-names \
 	server-cn-only \
+	server-ip-alt-names \
+	server-ip-cn-only \
+	server-ip-cn-and-alt-names \
+	server-ip-cn-and-dns-alt-names \
+	server-ip-in-dnsname \
 	server-single-alt-name \
 	server-multiple-alt-names \
 	server-no-names \
 	server-revoked
-CLIENTS := client client-dn client-revoked client_ext
+CLIENTS := client client-dn client-revoked client_ext client-long
 
 #
 # To add a new non-standard key, add it to SPECIAL_KEYS and then add a recipe

@@ -15,12 +15,6 @@ include $(top_builddir)/src/Makefile.global
 override CPPFLAGS := -I. -I$(srcdir) $(CPPFLAGS)
 
 OBJS = \
-	backup_manifest.o \
-	basebackup.o \
-	basebackup_copy.o \
-	basebackup_progress.o \
-	basebackup_sink.o \
-	basebackup_throttle.o \
 	repl_gram.o \
 	slot.o \
 	slotfuncs.o \

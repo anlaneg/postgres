@@ -41,7 +41,7 @@ make
 su
 make install
 adduser postgres
-mkdir /usr/local/pgsql/data
+mkdir -p /usr/local/pgsql/data
 chown postgres /usr/local/pgsql/data
 su - postgres
 /usr/local/pgsql/bin/initdb -D /usr/local/pgsql/data
@@ -77,7 +77,7 @@ su - postgres
        <primary>make</primary>
       </indexterm>
 
-      <acronym>GNU</acronym> <application>make</application> version 3.80 or newer is required; other
+      <acronym>GNU</acronym> <application>make</application> version 3.81 or newer is required; other
       <application>make</application> programs or older <acronym>GNU</acronym> <application>make</application> versions will <emphasis>not</emphasis> work.
       (<acronym>GNU</acronym> <application>make</application> is sometimes installed under
       the name <filename>gmake</filename>.)  To test for <acronym>GNU</acronym>
@@ -195,12 +195,8 @@ su - postgres
       To build the <application>PL/Python</application> server programming
       language, you need a <productname>Python</productname>
       installation with the header files and
-      the <application>distutils</application> module.  The minimum
-      required version is <productname>Python</productname> 2.6.
-      <productname>Python 3</productname> is supported if it's
-      version 3.1 or later; but see
-      <xref linkend="plpython-python23"/>
-      when using Python 3.
+      the <application>sysconfig</application> module.  The minimum
+      required version is <productname>Python</productname> 3.2.
      </para>
 
      <para>
@@ -254,7 +250,7 @@ su - postgres
       encrypted client connections.  <productname>OpenSSL</productname> is
       also required for random number generation on platforms that do not
       have <filename>/dev/urandom</filename> (except Windows).  The minimum
-      version required is 1.0.1.
+      required version is 1.0.1.
      </para>
     </listitem>
 
@@ -269,9 +265,18 @@ su - postgres
     <listitem>
      <para>
       You need <productname>LZ4</productname>, if you want to support
-      compression of data with this method; see
+      compression of data with that method; see
       <xref linkend="guc-default-toast-compression"/> and
       <xref linkend="guc-wal-compression"/>.
+     </para>
+    </listitem>
+
+    <listitem>
+     <para>
+      You need <productname>Zstandard</productname>, if you want to support
+      compression of data with that method; see
+      <xref linkend="guc-wal-compression"/>.
+      The minimum required version is 1.4.0.
      </para>
     </listitem>
 
@@ -983,8 +988,15 @@ build-postgresql:
        <listitem>
         <para>
          Build with <productname>LZ4</productname> compression support.
-         This allows the use of <productname>LZ4</productname> for
-         compression of table and WAL data.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry>
+       <term><option>--with-zstd</option></term>
+       <listitem>
+        <para>
+         Build with <productname>Zstandard</productname> compression support.
         </para>
        </listitem>
       </varlistentry>
@@ -1868,14 +1880,10 @@ build-postgresql:
        <term><envar>PYTHON</envar></term>
        <listitem>
         <para>
-         Python interpreter program.  This will be used to
-         determine the dependencies for building PL/Python.  Also,
-         whether Python 2 or 3 is specified here (or otherwise
-         implicitly chosen) determines which variant of the PL/Python
-         language becomes available.  See
-         <xref linkend="plpython-python23"/>
-         for more information.  If this is not set, the following are probed
-         in this order: <literal>python python3 python2</literal>.
+         Python interpreter program.  This will be used to determine the
+         dependencies for building PL/Python.  If this is not set, the
+         following are probed in this order:
+         <literal>python3 python</literal>.
         </para>
        </listitem>
       </varlistentry>
@@ -1966,7 +1974,6 @@ build-postgresql:
     shared libraries.  The systems on which this is
     <emphasis>not</emphasis> necessary include
     <systemitem class="osname">FreeBSD</systemitem>,
-    <systemitem class="osname">HP-UX</systemitem>,
     <systemitem class="osname">Linux</systemitem>,
     <systemitem class="osname">NetBSD</systemitem>, <systemitem
     class="osname">OpenBSD</systemitem>, and
@@ -2118,18 +2125,18 @@ export MANPATH
 
   <para>
    In general, <productname>PostgreSQL</productname> can be expected to work on
-   these CPU architectures: x86, x86_64, IA64, PowerPC,
-   PowerPC 64, S/390, S/390x, Sparc, Sparc 64, ARM, MIPS, MIPSEL,
-   and PA-RISC.  Code support exists for M68K, M32R, and VAX, but these
-   architectures are not known to have been tested recently.  It is often
+   these CPU architectures: x86, PowerPC, S/390, SPARC, ARM, MIPS, RISC-V,
+   and PA-RISC, including
+   big-endian, little-endian, 32-bit, and 64-bit variants where applicable.
+   It is often
    possible to build on an unsupported CPU type by configuring with
    <option>--disable-spinlocks</option>, but performance will be poor.
   </para>
 
   <para>
-   <productname>PostgreSQL</productname> can be expected to work on these operating
-   systems: Linux (all recent distributions), Windows (XP and later),
-   FreeBSD, OpenBSD, NetBSD, macOS, AIX, HP/UX, and Solaris.
+   <productname>PostgreSQL</productname> can be expected to work on current
+   versions of these operating systems: Linux, Windows,
+   FreeBSD, OpenBSD, NetBSD, DragonFlyBSD, macOS, AIX, Solaris, and illumos.
    Other Unix-like systems may also work but are not currently
    being tested.  In most cases, all CPU architectures supported by
    a given operating system will work.  Look in
@@ -2145,6 +2152,14 @@ export MANPATH
    in porting <productname>PostgreSQL</productname> to a new platform,
    <email>pgsql-hackers@lists.postgresql.org</email> is the appropriate place
    to discuss that.
+  </para>
+
+  <para>
+   Historical versions of <productname>PostgreSQL</productname> or POSTGRES
+   also ran on CPU architectures including Alpha, Itanium, M32R, M68K,
+   M88K, NS32K, SuperH, and VAX, and operating systems including 4.3BSD, BEOS,
+   BSD/OS, DG/UX, Dynix, HP-UX, IRIX, NeXTSTEP, QNX, SCO, SINIX, Sprite, SunOS,
+   Tru64 UNIX, and ULTRIX.
   </para>
  </sect1>
 
@@ -2315,16 +2330,15 @@ ERROR:  could not load library "/opt/dbs/pgsql/lib/plperl.so": Bad address
      <listitem>
       <para>
        The <command>adduser</command> command is not supported; use
-       the appropriate user management application on Windows NT,
-       2000, or XP.  Otherwise, skip this step.
+       the appropriate user management application on Windows.
+       Otherwise, skip this step.
       </para>
      </listitem>
 
      <listitem>
       <para>
        The <command>su</command> command is not supported; use ssh to
-       simulate su on Windows NT, 2000, or XP. Otherwise, skip this
-       step.
+       simulate su on Windows. Otherwise, skip this step.
       </para>
      </listitem>
 

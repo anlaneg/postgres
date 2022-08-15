@@ -3,7 +3,7 @@
  * nbtdesc.c
  *	  rmgr descriptor routines for access/nbtree/nbtxlog.c
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -101,8 +101,8 @@ btree_desc(StringInfo buf, XLogReaderState *record)
 				xl_btree_reuse_page *xlrec = (xl_btree_reuse_page *) rec;
 
 				appendStringInfo(buf, "rel %u/%u/%u; latestRemovedXid %u:%u",
-								 xlrec->node.spcNode, xlrec->node.dbNode,
-								 xlrec->node.relNode,
+								 xlrec->locator.spcOid, xlrec->locator.dbOid,
+								 xlrec->locator.relNumber,
 								 EpochFromFullTransactionId(xlrec->latestRemovedFullXid),
 								 XidFromFullTransactionId(xlrec->latestRemovedFullXid));
 				break;

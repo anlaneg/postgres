@@ -3,7 +3,7 @@
  * pathnode.c
  *	  Routines to manipulate pathlists and create path nodes
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1326,23 +1326,32 @@ create_append_path(PlannerInfo *root,
 	Assert(!parallel_aware || pathnode->path.parallel_safe);
 
 	/*
-	 * If there's exactly one child path, the Append is a no-op and will be
-	 * discarded later (in setrefs.c); therefore, we can inherit the child's
-	 * size and cost, as well as its pathkeys if any (overriding whatever the
-	 * caller might've said).  Otherwise, we must do the normal costsize
+	 * If there's exactly one child path then the output of the Append is
+	 * necessarily ordered the same as the child's, so we can inherit the
+	 * child's pathkeys if any, overriding whatever the caller might've said.
+	 * Furthermore, if the child's parallel awareness matches the Append's,
+	 * then the Append is a no-op and will be discarded later (in setrefs.c).
+	 * Then we can inherit the child's size and cost too, effectively charging
+	 * zero for the Append.  Otherwise, we must do the normal costsize
 	 * calculation.
 	 */
 	if (list_length(pathnode->subpaths) == 1)
 	{
 		Path	   *child = (Path *) linitial(pathnode->subpaths);
 
-		pathnode->path.rows = child->rows;
-		pathnode->path.startup_cost = child->startup_cost;
-		pathnode->path.total_cost = child->total_cost;
+		if (child->parallel_aware == parallel_aware)
+		{
+			pathnode->path.rows = child->rows;
+			pathnode->path.startup_cost = child->startup_cost;
+			pathnode->path.total_cost = child->total_cost;
+		}
+		else
+			cost_append(pathnode, root);
+		/* Must do this last, else cost_append complains */
 		pathnode->path.pathkeys = child->pathkeys;
 	}
 	else
-		cost_append(pathnode);
+		cost_append(pathnode, root);
 
 	/* If the caller provided a row estimate, override the computed value. */
 	if (rows >= 0)
@@ -1476,10 +1485,13 @@ create_merge_append_path(PlannerInfo *root,
 
 	/*
 	 * Now we can compute total costs of the MergeAppend.  If there's exactly
-	 * one child path, the MergeAppend is a no-op and will be discarded later
-	 * (in setrefs.c); otherwise we do the normal cost calculation.
+	 * one child path and its parallel awareness matches that of the
+	 * MergeAppend, then the MergeAppend is a no-op and will be discarded
+	 * later (in setrefs.c); otherwise we do the normal cost calculation.
 	 */
-	if (list_length(subpaths) == 1)
+	if (list_length(subpaths) == 1 &&
+		((Path *) linitial(subpaths))->parallel_aware ==
+		pathnode->path.parallel_aware)
 	{
 		pathnode->path.startup_cost = input_startup_cost;
 		pathnode->path.total_cost = input_total_cost;
@@ -1986,9 +1998,15 @@ create_gather_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
  * create_subqueryscan_path
  *	  Creates a path corresponding to a scan of a subquery,
  *	  returning the pathnode.
+ *
+ * Caller must pass trivial_pathtarget = true if it believes rel->reltarget to
+ * be trivial, ie just a fetch of all the subquery output columns in order.
+ * While we could determine that here, the caller can usually do it more
+ * efficiently (or at least amortize it over multiple calls).
  */
 SubqueryScanPath *
 create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
+						 bool trivial_pathtarget,
 						 List *pathkeys, Relids required_outer)
 {
 	SubqueryScanPath *pathnode = makeNode(SubqueryScanPath);
@@ -2005,7 +2023,8 @@ create_subqueryscan_path(PlannerInfo *root, RelOptInfo *rel, Path *subpath,
 	pathnode->path.pathkeys = pathkeys;
 	pathnode->subpath = subpath;
 
-	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info);
+	cost_subqueryscan(pathnode, root, rel, pathnode->path.param_info,
+					  trivial_pathtarget);
 
 	return pathnode;
 }
@@ -3158,7 +3177,6 @@ create_agg_path(PlannerInfo *root,
  * 'having_qual' is the HAVING quals if any
  * 'rollups' is a list of RollupData nodes
  * 'agg_costs' contains cost info about the aggregate functions to be computed
- * 'numGroups' is the estimated total number of groups
  */
 GroupingSetsPath *
 create_groupingsets_path(PlannerInfo *root,
@@ -3167,8 +3185,7 @@ create_groupingsets_path(PlannerInfo *root,
 						 List *having_qual,
 						 AggStrategy aggstrategy,
 						 List *rollups,
-						 const AggClauseCosts *agg_costs,
-						 double numGroups)
+						 const AggClauseCosts *agg_costs)
 {
 	GroupingSetsPath *pathnode = makeNode(GroupingSetsPath);
 	PathTarget *target = rel->reltarget;
@@ -3388,6 +3405,10 @@ create_minmaxagg_path(PlannerInfo *root,
  * 'target' is the PathTarget to be computed
  * 'windowFuncs' is a list of WindowFunc structs
  * 'winclause' is a WindowClause that is common to all the WindowFuncs
+ * 'qual' WindowClause.runconditions from lower-level WindowAggPaths.
+ *		Must always be NIL when topwindow == false
+ * 'topwindow' pass as true only for the top-level WindowAgg. False for all
+ *		intermediate WindowAggs.
  *
  * The input must be sorted according to the WindowClause's PARTITION keys
  * plus ORDER BY keys.
@@ -3398,9 +3419,14 @@ create_windowagg_path(PlannerInfo *root,
 					  Path *subpath,
 					  PathTarget *target,
 					  List *windowFuncs,
-					  WindowClause *winclause)
+					  WindowClause *winclause,
+					  List *qual,
+					  bool topwindow)
 {
 	WindowAggPath *pathnode = makeNode(WindowAggPath);
+
+	/* qual can only be set for the topwindow */
+	Assert(qual == NIL || topwindow);
 
 	pathnode->path.pathtype = T_WindowAgg;
 	pathnode->path.parent = rel;
@@ -3416,6 +3442,8 @@ create_windowagg_path(PlannerInfo *root,
 
 	pathnode->subpath = subpath;
 	pathnode->winclause = winclause;
+	pathnode->qual = qual;
+	pathnode->topwindow = topwindow;
 
 	/*
 	 * For costing purposes, assume that there are no redundant partitioning
@@ -3620,6 +3648,7 @@ create_lockrows_path(PlannerInfo *root, RelOptInfo *rel,
  * 'rowMarks' is a list of PlanRowMarks (non-locking only)
  * 'onconflict' is the ON CONFLICT clause, or NULL
  * 'epqParam' is the ID of Param for EvalPlanQual re-eval
+ * 'mergeActionLists' is a list of lists of MERGE actions (one per rel)
  */
 ModifyTablePath *
 create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
@@ -3631,13 +3660,14 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 						List *updateColnosLists,
 						List *withCheckOptionLists, List *returningLists,
 						List *rowMarks, OnConflictExpr *onconflict,
-						int epqParam)
+						List *mergeActionLists, int epqParam)
 {
 	ModifyTablePath *pathnode = makeNode(ModifyTablePath);
 
-	Assert(operation == CMD_UPDATE ?
-		   list_length(resultRelations) == list_length(updateColnosLists) :
-		   updateColnosLists == NIL);
+	Assert(operation == CMD_MERGE ||
+		   (operation == CMD_UPDATE ?
+			list_length(resultRelations) == list_length(updateColnosLists) :
+			updateColnosLists == NIL));
 	Assert(withCheckOptionLists == NIL ||
 		   list_length(resultRelations) == list_length(withCheckOptionLists));
 	Assert(returningLists == NIL ||
@@ -3697,6 +3727,7 @@ create_modifytable_path(PlannerInfo *root, RelOptInfo *rel,
 	pathnode->rowMarks = rowMarks;
 	pathnode->onconflict = onconflict;
 	pathnode->epqParam = epqParam;
+	pathnode->mergeActionLists = mergeActionLists;
 
 	return pathnode;
 }
@@ -3889,10 +3920,23 @@ reparameterize_path(PlannerInfo *root, Path *path,
 		case T_SubqueryScan:
 			{
 				SubqueryScanPath *spath = (SubqueryScanPath *) path;
+				Path	   *subpath = spath->subpath;
+				bool		trivial_pathtarget;
+
+				/*
+				 * If existing node has zero extra cost, we must have decided
+				 * its target is trivial.  (The converse is not true, because
+				 * it might have a trivial target but quals to enforce; but in
+				 * that case the new node will too, so it doesn't matter
+				 * whether we get the right answer here.)
+				 */
+				trivial_pathtarget =
+					(subpath->total_cost == spath->path.total_cost);
 
 				return (Path *) create_subqueryscan_path(root,
 														 rel,
-														 spath->subpath,
+														 subpath,
+														 trivial_pathtarget,
 														 spath->path.pathkeys,
 														 required_outer);
 			}

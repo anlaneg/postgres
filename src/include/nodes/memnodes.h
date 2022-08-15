@@ -4,7 +4,7 @@
  *	  POSTGRES memory context node definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/nodes/memnodes.h
@@ -77,6 +77,8 @@ typedef struct MemoryContextMethods
 
 typedef struct MemoryContextData
 {
+	pg_node_attr(abstract)		/* there are no nodes of this type */
+
 	NodeTag		type;			/* identifies exact kind of context */
 	/* these two fields are placed here to minimize alignment wastage: */
 	bool		isReset;		/* T = no space alloced since last reset */

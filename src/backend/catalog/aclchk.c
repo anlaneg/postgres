@@ -3,7 +3,7 @@
  * aclchk.c
  *	  Routines to check access control permissions.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -48,6 +48,7 @@
 #include "catalog/pg_opclass.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
+#include "catalog/pg_parameter_acl.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_statistic_ext.h"
 #include "catalog/pg_subscription.h"
@@ -112,11 +113,13 @@ static void ExecGrant_Largeobject(InternalGrant *grantStmt);
 static void ExecGrant_Namespace(InternalGrant *grantStmt);
 static void ExecGrant_Tablespace(InternalGrant *grantStmt);
 static void ExecGrant_Type(InternalGrant *grantStmt);
+static void ExecGrant_Parameter(InternalGrant *grantStmt);
 
 static void SetDefaultACLsInSchemas(InternalDefaultACL *iacls, List *nspnames);
 static void SetDefaultACL(InternalDefaultACL *iacls);
 
-static List *objectNamesToOids(ObjectType objtype, List *objnames);
+static List *objectNamesToOids(ObjectType objtype, List *objnames,
+							   bool is_grant);
 static List *objectsInSchemaToOids(ObjectType objtype, List *nspnames);
 static List *getRelationsInNamespace(Oid namespaceId, char relkind);
 static void expand_col_privileges(List *colnames, Oid table_oid,
@@ -259,6 +262,9 @@ restrict_and_check_grant(bool is_grant, AclMode avail_goptions, bool all_privs,
 		case OBJECT_TYPE:
 			whole_mask = ACL_ALL_RIGHTS_TYPE;
 			break;
+		case OBJECT_PARAMETER_ACL:
+			whole_mask = ACL_ALL_RIGHTS_PARAMETER_ACL;
+			break;
 		default:
 			elog(ERROR, "unrecognized object type: %d", objtype);
 			/* not reached, but keep compiler quiet */
@@ -390,7 +396,8 @@ ExecuteGrantStmt(GrantStmt *stmt)
 	switch (stmt->targtype)
 	{
 		case ACL_TARGET_OBJECT:
-			istmt.objects = objectNamesToOids(stmt->objtype, stmt->objects);
+			istmt.objects = objectNamesToOids(stmt->objtype, stmt->objects,
+											  stmt->is_grant);
 			break;
 		case ACL_TARGET_ALL_IN_SCHEMA:
 			istmt.objects = objectsInSchemaToOids(stmt->objtype, stmt->objects);
@@ -498,6 +505,10 @@ ExecuteGrantStmt(GrantStmt *stmt)
 			all_privileges = ACL_ALL_RIGHTS_FOREIGN_SERVER;
 			errormsg = gettext_noop("invalid privilege type %s for foreign server");
 			break;
+		case OBJECT_PARAMETER_ACL:
+			all_privileges = ACL_ALL_RIGHTS_PARAMETER_ACL;
+			errormsg = gettext_noop("invalid privilege type %s for parameter");
+			break;
 		default:
 			elog(ERROR, "unrecognized GrantStmt.objtype: %d",
 				 (int) stmt->objtype);
@@ -600,6 +611,9 @@ ExecGrantStmt_oids(InternalGrant *istmt)
 		case OBJECT_TABLESPACE:
 			ExecGrant_Tablespace(istmt);
 			break;
+		case OBJECT_PARAMETER_ACL:
+			ExecGrant_Parameter(istmt);
+			break;
 		default:
 			elog(ERROR, "unrecognized GrantStmt.objtype: %d",
 				 (int) istmt->objtype);
@@ -626,7 +640,7 @@ ExecGrantStmt_oids(InternalGrant *istmt)
  * to fail.
  */
 static List *
-objectNamesToOids(ObjectType objtype, List *objnames)
+objectNamesToOids(ObjectType objtype, List *objnames, bool is_grant)
 {
 	List	   *objects = NIL;
 	ListCell   *cell;
@@ -757,6 +771,37 @@ objectNamesToOids(ObjectType objtype, List *objnames)
 				Oid			srvid = get_foreign_server_oid(srvname, false);
 
 				objects = lappend_oid(objects, srvid);
+			}
+			break;
+		case OBJECT_PARAMETER_ACL:
+			foreach(cell, objnames)
+			{
+				/*
+				 * In this code we represent a GUC by the OID of its entry in
+				 * pg_parameter_acl, which we have to manufacture here if it
+				 * doesn't exist yet.  (That's a hack for sure, but it avoids
+				 * messing with all the GRANT/REVOKE infrastructure that
+				 * expects to use OIDs for object identities.)  However, if
+				 * this is a REVOKE, we can instead just ignore any GUCs that
+				 * don't have such an entry, as they must not have any
+				 * privileges needing removal.
+				 */
+				char	   *parameter = strVal(lfirst(cell));
+				Oid			parameterId = ParameterAclLookup(parameter, true);
+
+				if (!OidIsValid(parameterId) && is_grant)
+				{
+					parameterId = ParameterAclCreate(parameter);
+
+					/*
+					 * Prevent error when processing duplicate objects, and
+					 * make this new entry visible so that ExecGrant_Parameter
+					 * can update it.
+					 */
+					CommandCounterIncrement();
+				}
+				if (OidIsValid(parameterId))
+					objects = lappend_oid(objects, parameterId);
 			}
 			break;
 		default:
@@ -1143,9 +1188,6 @@ SetDefaultACL(InternalDefaultACL *iacls)
 	Acl		   *old_acl;
 	Acl		   *new_acl;
 	HeapTuple	newtuple;
-	Datum		values[Natts_pg_default_acl];
-	bool		nulls[Natts_pg_default_acl];
-	bool		replaces[Natts_pg_default_acl];
 	int			noldmembers;
 	int			nnewmembers;
 	Oid		   *oldmembers;
@@ -1296,12 +1338,10 @@ SetDefaultACL(InternalDefaultACL *iacls)
 	}
 	else
 	{
+		Datum		values[Natts_pg_default_acl] = {0};
+		bool		nulls[Natts_pg_default_acl] = {0};
+		bool		replaces[Natts_pg_default_acl] = {0};
 		Oid			defAclOid;
-
-		/* Prepare to insert or update pg_default_acl entry */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
 
 		if (isNew)
 		{
@@ -1494,6 +1534,9 @@ RemoveRoleFromObjectACL(Oid roleid, Oid classid, Oid objid)
 			case ForeignDataWrapperRelationId:
 				istmt.objtype = OBJECT_FDW;
 				break;
+			case ParameterAclRelationId:
+				istmt.objtype = OBJECT_PARAMETER_ACL;
+				break;
 			default:
 				elog(ERROR, "unexpected object class %u", classid);
 				break;
@@ -1614,9 +1657,9 @@ ExecGrant_Attribute(InternalGrant *istmt, Oid relOid, const char *relname,
 	AclMode		avail_goptions;
 	bool		need_update;
 	HeapTuple	newtuple;
-	Datum		values[Natts_pg_attribute];
-	bool		nulls[Natts_pg_attribute];
-	bool		replaces[Natts_pg_attribute];
+	Datum		values[Natts_pg_attribute] = {0};
+	bool		nulls[Natts_pg_attribute] = {0};
+	bool		replaces[Natts_pg_attribute] = {0};
 	int			noldmembers;
 	int			nnewmembers;
 	Oid		   *oldmembers;
@@ -1697,9 +1740,6 @@ ExecGrant_Attribute(InternalGrant *istmt, Oid relOid, const char *relname,
 	nnewmembers = aclmembers(new_acl, &newmembers);
 
 	/* finished building new ACL value, now insert it */
-	MemSet(values, 0, sizeof(values));
-	MemSet(nulls, false, sizeof(nulls));
-	MemSet(replaces, false, sizeof(replaces));
 
 	/*
 	 * If the updated ACL is empty, we can set attacl to null, and maybe even
@@ -1927,9 +1967,9 @@ ExecGrant_Relation(InternalGrant *istmt)
 			Acl		   *new_acl;
 			Oid			grantorId;
 			HeapTuple	newtuple;
-			Datum		values[Natts_pg_class];
-			bool		nulls[Natts_pg_class];
-			bool		replaces[Natts_pg_class];
+			Datum		values[Natts_pg_class] = {0};
+			bool		nulls[Natts_pg_class] = {0};
+			bool		replaces[Natts_pg_class] = {0};
 			int			nnewmembers;
 			Oid		   *newmembers;
 			ObjectType	objtype;
@@ -1979,10 +2019,6 @@ ExecGrant_Relation(InternalGrant *istmt)
 			nnewmembers = aclmembers(new_acl, &newmembers);
 
 			/* finished building new ACL value, now insert it */
-			MemSet(values, 0, sizeof(values));
-			MemSet(nulls, false, sizeof(nulls));
-			MemSet(replaces, false, sizeof(replaces));
-
 			replaces[Anum_pg_class_relacl - 1] = true;
 			values[Anum_pg_class_relacl - 1] = PointerGetDatum(new_acl);
 
@@ -2102,9 +2138,9 @@ ExecGrant_Database(InternalGrant *istmt)
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_database];
-		bool		nulls[Natts_pg_database];
-		bool		replaces[Natts_pg_database];
+		Datum		values[Natts_pg_database] = {0};
+		bool		nulls[Natts_pg_database] = {0};
+		bool		replaces[Natts_pg_database] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2169,10 +2205,6 @@ ExecGrant_Database(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_database_datacl - 1] = true;
 		values[Anum_pg_database_datacl - 1] = PointerGetDatum(new_acl);
 
@@ -2223,9 +2255,9 @@ ExecGrant_Fdw(InternalGrant *istmt)
 		Oid			ownerId;
 		HeapTuple	tuple;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_foreign_data_wrapper];
-		bool		nulls[Natts_pg_foreign_data_wrapper];
-		bool		replaces[Natts_pg_foreign_data_wrapper];
+		Datum		values[Natts_pg_foreign_data_wrapper] = {0};
+		bool		nulls[Natts_pg_foreign_data_wrapper] = {0};
+		bool		replaces[Natts_pg_foreign_data_wrapper] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2291,10 +2323,6 @@ ExecGrant_Fdw(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_foreign_data_wrapper_fdwacl - 1] = true;
 		values[Anum_pg_foreign_data_wrapper_fdwacl - 1] = PointerGetDatum(new_acl);
 
@@ -2350,9 +2378,9 @@ ExecGrant_ForeignServer(InternalGrant *istmt)
 		Oid			ownerId;
 		HeapTuple	tuple;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_foreign_server];
-		bool		nulls[Natts_pg_foreign_server];
-		bool		replaces[Natts_pg_foreign_server];
+		Datum		values[Natts_pg_foreign_server] = {0};
+		bool		nulls[Natts_pg_foreign_server] = {0};
+		bool		replaces[Natts_pg_foreign_server] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2417,10 +2445,6 @@ ExecGrant_ForeignServer(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_foreign_server_srvacl - 1] = true;
 		values[Anum_pg_foreign_server_srvacl - 1] = PointerGetDatum(new_acl);
 
@@ -2475,9 +2499,9 @@ ExecGrant_Function(InternalGrant *istmt)
 		Oid			ownerId;
 		HeapTuple	tuple;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_proc];
-		bool		nulls[Natts_pg_proc];
-		bool		replaces[Natts_pg_proc];
+		Datum		values[Natts_pg_proc] = {0};
+		bool		nulls[Natts_pg_proc] = {0};
+		bool		replaces[Natts_pg_proc] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2541,10 +2565,6 @@ ExecGrant_Function(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_proc_proacl - 1] = true;
 		values[Anum_pg_proc_proacl - 1] = PointerGetDatum(new_acl);
 
@@ -2598,9 +2618,9 @@ ExecGrant_Language(InternalGrant *istmt)
 		Oid			ownerId;
 		HeapTuple	tuple;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_language];
-		bool		nulls[Natts_pg_language];
-		bool		replaces[Natts_pg_language];
+		Datum		values[Natts_pg_language] = {0};
+		bool		nulls[Natts_pg_language] = {0};
+		bool		replaces[Natts_pg_language] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2672,10 +2692,6 @@ ExecGrant_Language(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_language_lanacl - 1] = true;
 		values[Anum_pg_language_lanacl - 1] = PointerGetDatum(new_acl);
 
@@ -2730,9 +2746,9 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_largeobject_metadata];
-		bool		nulls[Natts_pg_largeobject_metadata];
-		bool		replaces[Natts_pg_largeobject_metadata];
+		Datum		values[Natts_pg_largeobject_metadata] = {0};
+		bool		nulls[Natts_pg_largeobject_metadata] = {0};
+		bool		replaces[Natts_pg_largeobject_metadata] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2810,10 +2826,6 @@ ExecGrant_Largeobject(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_largeobject_metadata_lomacl - 1] = true;
 		values[Anum_pg_largeobject_metadata_lomacl - 1]
 			= PointerGetDatum(new_acl);
@@ -2869,9 +2881,9 @@ ExecGrant_Namespace(InternalGrant *istmt)
 		Oid			ownerId;
 		HeapTuple	tuple;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_namespace];
-		bool		nulls[Natts_pg_namespace];
-		bool		replaces[Natts_pg_namespace];
+		Datum		values[Natts_pg_namespace] = {0};
+		bool		nulls[Natts_pg_namespace] = {0};
+		bool		replaces[Natts_pg_namespace] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -2936,10 +2948,6 @@ ExecGrant_Namespace(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_namespace_nspacl - 1] = true;
 		values[Anum_pg_namespace_nspacl - 1] = PointerGetDatum(new_acl);
 
@@ -2992,9 +3000,9 @@ ExecGrant_Tablespace(InternalGrant *istmt)
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_tablespace];
-		bool		nulls[Natts_pg_tablespace];
-		bool		replaces[Natts_pg_tablespace];
+		Datum		values[Natts_pg_tablespace] = {0};
+		bool		nulls[Natts_pg_tablespace] = {0};
+		bool		replaces[Natts_pg_tablespace] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -3060,10 +3068,6 @@ ExecGrant_Tablespace(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_tablespace_spcacl - 1] = true;
 		values[Anum_pg_tablespace_spcacl - 1] = PointerGetDatum(new_acl);
 
@@ -3112,9 +3116,9 @@ ExecGrant_Type(InternalGrant *istmt)
 		Oid			grantorId;
 		Oid			ownerId;
 		HeapTuple	newtuple;
-		Datum		values[Natts_pg_type];
-		bool		nulls[Natts_pg_type];
-		bool		replaces[Natts_pg_type];
+		Datum		values[Natts_pg_type] = {0};
+		bool		nulls[Natts_pg_type] = {0};
+		bool		replaces[Natts_pg_type] = {0};
 		int			noldmembers;
 		int			nnewmembers;
 		Oid		   *oldmembers;
@@ -3194,10 +3198,6 @@ ExecGrant_Type(InternalGrant *istmt)
 		nnewmembers = aclmembers(new_acl, &newmembers);
 
 		/* finished building new ACL value, now insert it */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, false, sizeof(nulls));
-		MemSet(replaces, false, sizeof(replaces));
-
 		replaces[Anum_pg_type_typacl - 1] = true;
 		values[Anum_pg_type_typacl - 1] = PointerGetDatum(new_acl);
 
@@ -3211,6 +3211,150 @@ ExecGrant_Type(InternalGrant *istmt)
 
 		/* Update the shared dependency ACL info */
 		updateAclDependencies(TypeRelationId, typId, 0,
+							  ownerId,
+							  noldmembers, oldmembers,
+							  nnewmembers, newmembers);
+
+		ReleaseSysCache(tuple);
+		pfree(new_acl);
+
+		/* prevent error when processing duplicate objects */
+		CommandCounterIncrement();
+	}
+
+	table_close(relation, RowExclusiveLock);
+}
+
+static void
+ExecGrant_Parameter(InternalGrant *istmt)
+{
+	Relation	relation;
+	ListCell   *cell;
+
+	if (istmt->all_privs && istmt->privileges == ACL_NO_RIGHTS)
+		istmt->privileges = ACL_ALL_RIGHTS_PARAMETER_ACL;
+
+	relation = table_open(ParameterAclRelationId, RowExclusiveLock);
+
+	foreach(cell, istmt->objects)
+	{
+		Oid			parameterId = lfirst_oid(cell);
+		Datum		nameDatum;
+		const char *parname;
+		Datum		aclDatum;
+		bool		isNull;
+		AclMode		avail_goptions;
+		AclMode		this_privileges;
+		Acl		   *old_acl;
+		Acl		   *new_acl;
+		Oid			grantorId;
+		Oid			ownerId;
+		HeapTuple	tuple;
+		int			noldmembers;
+		int			nnewmembers;
+		Oid		   *oldmembers;
+		Oid		   *newmembers;
+
+		tuple = SearchSysCache1(PARAMETERACLOID, ObjectIdGetDatum(parameterId));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for parameter ACL %u",
+				 parameterId);
+
+		/* We'll need the GUC's name */
+		nameDatum = SysCacheGetAttr(PARAMETERACLOID, tuple,
+									Anum_pg_parameter_acl_parname,
+									&isNull);
+		Assert(!isNull);
+		parname = TextDatumGetCString(nameDatum);
+
+		/* Treat all parameters as belonging to the bootstrap superuser. */
+		ownerId = BOOTSTRAP_SUPERUSERID;
+
+		/*
+		 * Get working copy of existing ACL. If there's no ACL, substitute the
+		 * proper default.
+		 */
+		aclDatum = SysCacheGetAttr(PARAMETERACLOID, tuple,
+								   Anum_pg_parameter_acl_paracl,
+								   &isNull);
+
+		if (isNull)
+		{
+			old_acl = acldefault(istmt->objtype, ownerId);
+			/* There are no old member roles according to the catalogs */
+			noldmembers = 0;
+			oldmembers = NULL;
+		}
+		else
+		{
+			old_acl = DatumGetAclPCopy(aclDatum);
+			/* Get the roles mentioned in the existing ACL */
+			noldmembers = aclmembers(old_acl, &oldmembers);
+		}
+
+		/* Determine ID to do the grant as, and available grant options */
+		select_best_grantor(GetUserId(), istmt->privileges,
+							old_acl, ownerId,
+							&grantorId, &avail_goptions);
+
+		/*
+		 * Restrict the privileges to what we can actually grant, and emit the
+		 * standards-mandated warning and error messages.
+		 */
+		this_privileges =
+			restrict_and_check_grant(istmt->is_grant, avail_goptions,
+									 istmt->all_privs, istmt->privileges,
+									 parameterId, grantorId,
+									 OBJECT_PARAMETER_ACL,
+									 parname,
+									 0, NULL);
+
+		/*
+		 * Generate new ACL.
+		 */
+		new_acl = merge_acl_with_grant(old_acl, istmt->is_grant,
+									   istmt->grant_option, istmt->behavior,
+									   istmt->grantees, this_privileges,
+									   grantorId, ownerId);
+
+		/*
+		 * We need the members of both old and new ACLs so we can correct the
+		 * shared dependency information.
+		 */
+		nnewmembers = aclmembers(new_acl, &newmembers);
+
+		/*
+		 * If the new ACL is equal to the default, we don't need the catalog
+		 * entry any longer.  Delete it rather than updating it, to avoid
+		 * leaving a degenerate entry.
+		 */
+		if (aclequal(new_acl, acldefault(istmt->objtype, ownerId)))
+		{
+			CatalogTupleDelete(relation, &tuple->t_self);
+		}
+		else
+		{
+			/* finished building new ACL value, now insert it */
+			HeapTuple	newtuple;
+			Datum		values[Natts_pg_parameter_acl] = {0};
+			bool		nulls[Natts_pg_parameter_acl] = {0};
+			bool		replaces[Natts_pg_parameter_acl] = {0};
+
+			replaces[Anum_pg_parameter_acl_paracl - 1] = true;
+			values[Anum_pg_parameter_acl_paracl - 1] = PointerGetDatum(new_acl);
+
+			newtuple = heap_modify_tuple(tuple, RelationGetDescr(relation),
+										 values, nulls, replaces);
+
+			CatalogTupleUpdate(relation, &newtuple->t_self, newtuple);
+		}
+
+		/* Update initial privileges for extensions */
+		recordExtensionInitPriv(parameterId, ParameterAclRelationId, 0,
+								new_acl);
+
+		/* Update the shared dependency ACL info */
+		updateAclDependencies(ParameterAclRelationId, parameterId, 0,
 							  ownerId,
 							  noldmembers, oldmembers,
 							  nnewmembers, newmembers);
@@ -3255,6 +3399,10 @@ string_to_privilege(const char *privname)
 		return ACL_CREATE_TEMP;
 	if (strcmp(privname, "connect") == 0)
 		return ACL_CONNECT;
+	if (strcmp(privname, "set") == 0)
+		return ACL_SET;
+	if (strcmp(privname, "alter system") == 0)
+		return ACL_ALTER_SYSTEM;
 	if (strcmp(privname, "rule") == 0)
 		return 0;				/* ignore old RULE privileges */
 	ereport(ERROR,
@@ -3292,6 +3440,10 @@ privilege_to_string(AclMode privilege)
 			return "TEMP";
 		case ACL_CONNECT:
 			return "CONNECT";
+		case ACL_SET:
+			return "SET";
+		case ACL_ALTER_SYSTEM:
+			return "ALTER SYSTEM";
 		default:
 			elog(ERROR, "unrecognized privilege: %d", (int) privilege);
 	}
@@ -3375,6 +3527,9 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 						break;
 					case OBJECT_OPFAMILY:
 						msg = gettext_noop("permission denied for operator family %s");
+						break;
+					case OBJECT_PARAMETER_ACL:
+						msg = gettext_noop("permission denied for parameter %s");
 						break;
 					case OBJECT_POLICY:
 						msg = gettext_noop("permission denied for policy %s");
@@ -3567,6 +3722,7 @@ aclcheck_error(AclResult aclerr, ObjectType objtype,
 					case OBJECT_DEFAULT:
 					case OBJECT_DEFACL:
 					case OBJECT_DOMCONSTRAINT:
+					case OBJECT_PARAMETER_ACL:
 					case OBJECT_PUBLICATION_NAMESPACE:
 					case OBJECT_PUBLICATION_REL:
 					case OBJECT_ROLE:
@@ -3653,6 +3809,8 @@ pg_aclmask(ObjectType objtype, Oid table_oid, AttrNumber attnum, Oid roleid,
 		case OBJECT_LARGEOBJECT:
 			return pg_largeobject_aclmask_snapshot(table_oid, roleid,
 												   mask, how, NULL);
+		case OBJECT_PARAMETER_ACL:
+			return pg_parameter_acl_aclmask(table_oid, roleid, mask, how);
 		case OBJECT_SCHEMA:
 			return pg_namespace_aclmask(table_oid, roleid, mask, how);
 		case OBJECT_STATISTIC_EXT:
@@ -3990,6 +4148,121 @@ pg_database_aclmask(Oid db_oid, Oid roleid,
 	}
 
 	result = aclmask(acl, roleid, ownerId, mask, how);
+
+	/* if we have a detoasted copy, free it */
+	if (acl && (Pointer) acl != DatumGetPointer(aclDatum))
+		pfree(acl);
+
+	ReleaseSysCache(tuple);
+
+	return result;
+}
+
+/*
+ * Exported routine for examining a user's privileges for a configuration
+ * parameter (GUC), identified by GUC name.
+ */
+AclMode
+pg_parameter_aclmask(const char *name, Oid roleid, AclMode mask, AclMaskHow how)
+{
+	AclMode		result;
+	char	   *parname;
+	text	   *partext;
+	HeapTuple	tuple;
+
+	/* Superusers bypass all permission checking. */
+	if (superuser_arg(roleid))
+		return mask;
+
+	/* Convert name to the form it should have in pg_parameter_acl... */
+	parname = convert_GUC_name_for_parameter_acl(name);
+	partext = cstring_to_text(parname);
+
+	/* ... and look it up */
+	tuple = SearchSysCache1(PARAMETERACLNAME, PointerGetDatum(partext));
+
+	if (!HeapTupleIsValid(tuple))
+	{
+		/* If no entry, GUC has no permissions for non-superusers */
+		result = ACL_NO_RIGHTS;
+	}
+	else
+	{
+		Datum		aclDatum;
+		bool		isNull;
+		Acl		   *acl;
+
+		aclDatum = SysCacheGetAttr(PARAMETERACLNAME, tuple,
+								   Anum_pg_parameter_acl_paracl,
+								   &isNull);
+		if (isNull)
+		{
+			/* No ACL, so build default ACL */
+			acl = acldefault(OBJECT_PARAMETER_ACL, BOOTSTRAP_SUPERUSERID);
+			aclDatum = (Datum) 0;
+		}
+		else
+		{
+			/* detoast ACL if necessary */
+			acl = DatumGetAclP(aclDatum);
+		}
+
+		result = aclmask(acl, roleid, BOOTSTRAP_SUPERUSERID, mask, how);
+
+		/* if we have a detoasted copy, free it */
+		if (acl && (Pointer) acl != DatumGetPointer(aclDatum))
+			pfree(acl);
+
+		ReleaseSysCache(tuple);
+	}
+
+	pfree(parname);
+	pfree(partext);
+
+	return result;
+}
+
+/*
+ * Exported routine for examining a user's privileges for a configuration
+ * parameter (GUC), identified by the OID of its pg_parameter_acl entry.
+ */
+AclMode
+pg_parameter_acl_aclmask(Oid acl_oid, Oid roleid, AclMode mask, AclMaskHow how)
+{
+	AclMode		result;
+	HeapTuple	tuple;
+	Datum		aclDatum;
+	bool		isNull;
+	Acl		   *acl;
+
+	/* Superusers bypass all permission checking. */
+	if (superuser_arg(roleid))
+		return mask;
+
+	/* Get the ACL from pg_parameter_acl */
+	tuple = SearchSysCache1(PARAMETERACLOID, ObjectIdGetDatum(acl_oid));
+	if (!HeapTupleIsValid(tuple))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("parameter ACL with OID %u does not exist",
+						acl_oid)));
+
+	aclDatum = SysCacheGetAttr(PARAMETERACLOID, tuple,
+							   Anum_pg_parameter_acl_paracl,
+							   &isNull);
+	if (isNull)
+	{
+		/* No ACL, so build default ACL */
+		acl = acldefault(OBJECT_PARAMETER_ACL, BOOTSTRAP_SUPERUSERID);
+		aclDatum = (Datum) 0;
+	}
+	else
+	{
+		/* detoast ACL if necessary */
+		acl = DatumGetAclP(aclDatum);
+	}
+
+	result = aclmask(acl, roleid, BOOTSTRAP_SUPERUSERID, mask, how);
 
 	/* if we have a detoasted copy, free it */
 	if (acl && (Pointer) acl != DatumGetPointer(aclDatum))
@@ -4708,6 +4981,32 @@ AclResult
 pg_database_aclcheck(Oid db_oid, Oid roleid, AclMode mode)
 {
 	if (pg_database_aclmask(db_oid, roleid, mode, ACLMASK_ANY) != 0)
+		return ACLCHECK_OK;
+	else
+		return ACLCHECK_NO_PRIV;
+}
+
+/*
+ * Exported routine for checking a user's access privileges to a configuration
+ * parameter (GUC), identified by GUC name.
+ */
+AclResult
+pg_parameter_aclcheck(const char *name, Oid roleid, AclMode mode)
+{
+	if (pg_parameter_aclmask(name, roleid, mode, ACLMASK_ANY) != 0)
+		return ACLCHECK_OK;
+	else
+		return ACLCHECK_NO_PRIV;
+}
+
+/*
+ * Exported routine for checking a user's access privileges to a configuration
+ * parameter (GUC), identified by the OID of its pg_parameter_acl entry.
+ */
+AclResult
+pg_parameter_acl_aclcheck(Oid acl_oid, Oid roleid, AclMode mode)
+{
+	if (pg_parameter_acl_aclmask(acl_oid, roleid, mode, ACLMASK_ANY) != 0)
 		return ACLCHECK_OK;
 	else
 		return ACLCHECK_NO_PRIV;
@@ -6068,17 +6367,13 @@ recordExtensionInitPrivWorker(Oid objoid, Oid classoid, int objsubid, Acl *new_a
 	/* If we find an entry, update it with the latest ACL. */
 	if (HeapTupleIsValid(oldtuple))
 	{
-		Datum		values[Natts_pg_init_privs];
-		bool		nulls[Natts_pg_init_privs];
-		bool		replace[Natts_pg_init_privs];
+		Datum		values[Natts_pg_init_privs] = {0};
+		bool		nulls[Natts_pg_init_privs] = {0};
+		bool		replace[Natts_pg_init_privs] = {0};
 
 		/* If we have a new ACL to set, then update the row with it. */
 		if (new_acl)
 		{
-			MemSet(values, 0, sizeof(values));
-			MemSet(nulls, false, sizeof(nulls));
-			MemSet(replace, false, sizeof(replace));
-
 			values[Anum_pg_init_privs_initprivs - 1] = PointerGetDatum(new_acl);
 			replace[Anum_pg_init_privs_initprivs - 1] = true;
 
@@ -6095,8 +6390,8 @@ recordExtensionInitPrivWorker(Oid objoid, Oid classoid, int objsubid, Acl *new_a
 	}
 	else
 	{
-		Datum		values[Natts_pg_init_privs];
-		bool		nulls[Natts_pg_init_privs];
+		Datum		values[Natts_pg_init_privs] = {0};
+		bool		nulls[Natts_pg_init_privs] = {0};
 
 		/*
 		 * Only add a new entry if the new ACL is non-NULL.
@@ -6107,8 +6402,6 @@ recordExtensionInitPrivWorker(Oid objoid, Oid classoid, int objsubid, Acl *new_a
 		if (new_acl)
 		{
 			/* No entry found, so add it. */
-			MemSet(nulls, false, sizeof(nulls));
-
 			values[Anum_pg_init_privs_objoid - 1] = ObjectIdGetDatum(objoid);
 			values[Anum_pg_init_privs_classoid - 1] = ObjectIdGetDatum(classoid);
 			values[Anum_pg_init_privs_objsubid - 1] = Int32GetDatum(objsubid);

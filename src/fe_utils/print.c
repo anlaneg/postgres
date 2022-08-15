@@ -8,7 +8,7 @@
  * pager open/close functions, all that stuff came with it.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/fe_utils/print.c
@@ -966,7 +966,8 @@ print_aligned_text(const printTableContent *cont, FILE *fout, bool is_pager)
 
 			more_col_wrapping = col_count;
 			curr_nl_line = 0;
-			memset(header_done, false, col_count * sizeof(bool));
+			if (col_count > 0)
+				memset(header_done, false, col_count * sizeof(bool));
 			while (more_col_wrapping)
 			{
 				if (opt_border == 2)
@@ -1172,7 +1173,6 @@ print_aligned_text(const printTableContent *cont, FILE *fout, bool is_pager)
 			if (opt_border == 2)
 				fputs(dformat->rightvrule, fout);
 			fputc('\n', fout);
-
 		} while (more_lines);
 	}
 
@@ -1222,15 +1222,16 @@ cleanup:
 
 
 static void
-print_aligned_vertical_line(const printTextFormat *format,
-							const unsigned short opt_border,
+print_aligned_vertical_line(const printTableOpt *topt,
 							unsigned long record,
 							unsigned int hwidth,
 							unsigned int dwidth,
+							int output_columns,
 							printTextRule pos,
 							FILE *fout)
 {
-	const printTextLineFormat *lformat = &format->lrule[pos];
+	const printTextLineFormat *lformat = &get_line_style(topt)->lrule[pos];
+	const unsigned short opt_border = topt->border;
 	unsigned int i;
 	int			reclen = 0;
 
@@ -1259,8 +1260,18 @@ print_aligned_vertical_line(const printTextFormat *format,
 		if (reclen-- <= 0)
 			fputs(lformat->hrule, fout);
 		if (reclen-- <= 0)
-			fputs(lformat->midvrule, fout);
-		if (reclen-- <= 0)
+		{
+			if (topt->expanded_header_width_type == PRINT_XHEADER_COLUMN)
+			{
+				fputs(lformat->rightvrule, fout);
+			}
+			else
+			{
+				fputs(lformat->midvrule, fout);
+			}
+		}
+		if (reclen-- <= 0
+			&& topt->expanded_header_width_type != PRINT_XHEADER_COLUMN)
 			fputs(lformat->hrule, fout);
 	}
 	else
@@ -1268,12 +1279,43 @@ print_aligned_vertical_line(const printTextFormat *format,
 		if (reclen-- <= 0)
 			fputc(' ', fout);
 	}
-	if (reclen < 0)
-		reclen = 0;
-	for (i = reclen; i < dwidth; i++)
-		fputs(opt_border > 0 ? lformat->hrule : " ", fout);
-	if (opt_border == 2)
-		fprintf(fout, "%s%s", lformat->hrule, lformat->rightvrule);
+
+	if (topt->expanded_header_width_type != PRINT_XHEADER_COLUMN)
+	{
+		if (topt->expanded_header_width_type == PRINT_XHEADER_PAGE
+			|| topt->expanded_header_width_type == PRINT_XHEADER_EXACT_WIDTH)
+		{
+			if (topt->expanded_header_width_type == PRINT_XHEADER_EXACT_WIDTH)
+			{
+				output_columns = topt->expanded_header_exact_width;
+			}
+			if (output_columns > 0)
+			{
+				if (opt_border == 0)
+					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth)));
+				if (opt_border == 1)
+					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth - 3)));
+				/*
+				 * Handling the xheader width for border=2 doesn't make
+				 * much sense because this format has an additional
+				 * right border, but keep this for consistency.
+				 */
+				if (opt_border == 2)
+					dwidth = Min(dwidth, Max(0, (int) (output_columns - hwidth - 7)));
+			}
+		}
+
+		if (reclen < 0)
+			reclen = 0;
+		if (dwidth < reclen)
+			dwidth = reclen;
+
+		for (i = reclen; i < dwidth; i++)
+			fputs(opt_border > 0 ? lformat->hrule : " ", fout);
+		if (opt_border == 2)
+			fprintf(fout, "%s%s", lformat->hrule, lformat->rightvrule);
+	}
+
 	fputc('\n', fout);
 }
 
@@ -1570,11 +1612,12 @@ print_aligned_vertical(const printTableContent *cont,
 				lhwidth++;		/* for newline indicators */
 
 			if (!opt_tuples_only)
-				print_aligned_vertical_line(format, opt_border, record++,
-											lhwidth, dwidth, pos, fout);
+				print_aligned_vertical_line(cont->opt, record++,
+											lhwidth, dwidth, output_columns,
+											pos, fout);
 			else if (i != 0 || !cont->opt->start_table || opt_border == 2)
-				print_aligned_vertical_line(format, opt_border, 0, lhwidth,
-											dwidth, pos, fout);
+				print_aligned_vertical_line(cont->opt, 0, lhwidth,
+											dwidth, output_columns, pos, fout);
 		}
 
 		/* Format the header */
@@ -1760,8 +1803,8 @@ print_aligned_vertical(const printTableContent *cont,
 	if (cont->opt->stop_table)
 	{
 		if (opt_border == 2 && !cancel_pressed)
-			print_aligned_vertical_line(format, opt_border, 0, hwidth, dwidth,
-										PRINT_RULE_BOTTOM, fout);
+			print_aligned_vertical_line(cont->opt, 0, hwidth, dwidth,
+										output_columns, PRINT_RULE_BOTTOM, fout);
 
 		/* print footers */
 		if (!opt_tuples_only && cont->footers != NULL && !cancel_pressed)

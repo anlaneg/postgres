@@ -8,7 +8,7 @@
  *	  This file contains only the public interface routines.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -22,6 +22,7 @@
 #include "access/nbtxlog.h"
 #include "access/relscan.h"
 #include "access/xlog.h"
+#include "access/xloginsert.h"
 #include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "miscadmin.h"
@@ -113,7 +114,6 @@ bthandler(PG_FUNCTION_ARGS)
 	amroutine->amcanparallel = true;
 	amroutine->amcaninclude = true;
 	amroutine->amusemaintenanceworkmem = false;
-	amroutine->amhotblocking = true;
 	amroutine->amparallelvacuumoptions =
 		VACUUM_OPTION_PARALLEL_BULKDEL | VACUUM_OPTION_PARALLEL_COND_CLEANUP;
 	amroutine->amkeytype = InvalidOid;
@@ -160,13 +160,13 @@ btbuildempty(Relation index)
 	 * Write the page and log it.  It might seem that an immediate sync would
 	 * be sufficient to guarantee that the file exists on disk, but recovery
 	 * itself might remove it while replaying, for example, an
-	 * XLOG_DBASE_CREATE or XLOG_TBLSPC_CREATE record.  Therefore, we need
+	 * XLOG_DBASE_CREATE* or XLOG_TBLSPC_CREATE record.  Therefore, we need
 	 * this even when wal_level=minimal.
 	 */
 	PageSetChecksumInplace(metapage, BTREE_METAPAGE);
 	smgrwrite(RelationGetSmgr(index), INIT_FORKNUM, BTREE_METAPAGE,
 			  (char *) metapage, true);
-	log_newpage(&RelationGetSmgr(index)->smgr_rnode.node, INIT_FORKNUM,
+	log_newpage(&RelationGetSmgr(index)->smgr_rlocator.locator, INIT_FORKNUM,
 				BTREE_METAPAGE, metapage, true);
 
 	/*
@@ -1069,7 +1069,7 @@ backtrack:
 	if (!PageIsNew(page))
 	{
 		_bt_checkpage(rel, buf);
-		opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+		opaque = BTPageGetOpaque(page);
 	}
 
 	Assert(blkno <= scanblkno);

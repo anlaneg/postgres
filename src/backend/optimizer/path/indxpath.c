@@ -4,7 +4,7 @@
  *	  Routines to determine which indexes are usable for scanning a
  *	  given relation, and create Paths accordingly.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -1807,7 +1807,6 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 	bool		result;
 	Bitmapset  *attrs_used = NULL;
 	Bitmapset  *index_canreturn_attrs = NULL;
-	Bitmapset  *index_cannotreturn_attrs = NULL;
 	ListCell   *lc;
 	int			i;
 
@@ -1847,11 +1846,7 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 
 	/*
 	 * Construct a bitmapset of columns that the index can return back in an
-	 * index-only scan.  If there are multiple index columns containing the
-	 * same attribute, all of them must be capable of returning the value,
-	 * since we might recheck operators on any of them.  (Potentially we could
-	 * be smarter about that, but it's such a weird situation that it doesn't
-	 * seem worth spending a lot of sweat on.)
+	 * index-only scan.
 	 */
 	for (i = 0; i < index->ncolumns; i++)
 	{
@@ -1868,21 +1863,13 @@ check_index_only(RelOptInfo *rel, IndexOptInfo *index)
 			index_canreturn_attrs =
 				bms_add_member(index_canreturn_attrs,
 							   attno - FirstLowInvalidHeapAttributeNumber);
-		else
-			index_cannotreturn_attrs =
-				bms_add_member(index_cannotreturn_attrs,
-							   attno - FirstLowInvalidHeapAttributeNumber);
 	}
-
-	index_canreturn_attrs = bms_del_members(index_canreturn_attrs,
-											index_cannotreturn_attrs);
 
 	/* Do we have all the necessary attributes? */
 	result = bms_is_subset(attrs_used, index_canreturn_attrs);
 
 	bms_free(attrs_used);
 	bms_free(index_canreturn_attrs);
-	bms_free(index_cannotreturn_attrs);
 
 	return result;
 }
@@ -3039,14 +3026,12 @@ expand_indexqual_rowcompare(PlannerInfo *root,
 
 			rc->rctype = (RowCompareType) op_strategy;
 			rc->opnos = new_ops;
-			rc->opfamilies = list_truncate(list_copy(clause->opfamilies),
-										   matching_cols);
-			rc->inputcollids = list_truncate(list_copy(clause->inputcollids),
-											 matching_cols);
-			rc->largs = list_truncate(copyObject(var_args),
-									  matching_cols);
-			rc->rargs = list_truncate(copyObject(non_var_args),
-									  matching_cols);
+			rc->opfamilies = list_copy_head(clause->opfamilies,
+											matching_cols);
+			rc->inputcollids = list_copy_head(clause->inputcollids,
+											  matching_cols);
+			rc->largs = list_copy_head(var_args, matching_cols);
+			rc->rargs = list_copy_head(non_var_args, matching_cols);
 			iclause->indexquals = list_make1(make_simple_restrictinfo(root,
 																	  (Expr *) rc));
 		}

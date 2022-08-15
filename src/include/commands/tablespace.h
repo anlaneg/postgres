@@ -4,7 +4,7 @@
  *		Tablespace management commands (create/drop tablespace).
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/tablespace.h
@@ -18,6 +18,8 @@
 #include "catalog/objectaddress.h"
 #include "lib/stringinfo.h"
 #include "nodes/parsenodes.h"
+
+extern PGDLLIMPORT bool allow_in_place_tablespaces;
 
 /* XLOG stuff */
 #define XLOG_TBLSPC_CREATE		0x00
@@ -48,7 +50,7 @@ extern void DropTableSpace(DropTableSpaceStmt *stmt);
 extern ObjectAddress RenameTableSpace(const char *oldname, const char *newname);
 extern Oid	AlterTableSpaceOptions(AlterTableSpaceOptionsStmt *stmt);
 
-extern void TablespaceCreateDbspace(Oid spcNode, Oid dbNode, bool isRedo);
+extern void TablespaceCreateDbspace(Oid spcOid, Oid dbOid, bool isRedo);
 
 extern Oid	GetDefaultTablespace(char relpersistence, bool partitioned);
 

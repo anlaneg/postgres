@@ -5,7 +5,7 @@
  *
  * See src/backend/access/transam/README for more information.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -29,6 +29,7 @@
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "access/xloginsert.h"
+#include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
 #include "catalog/index.h"
 #include "catalog/namespace.h"
@@ -120,9 +121,9 @@ bool		bsysscan = false;
  * The XIDs are stored sorted in numerical order (not logical order) to make
  * lookups as fast as possible.
  */
-FullTransactionId XactTopFullTransactionId = {InvalidTransactionId};
-int			nParallelCurrentXids = 0;
-TransactionId *ParallelCurrentXids;
+static FullTransactionId XactTopFullTransactionId = {InvalidTransactionId};
+static int	nParallelCurrentXids = 0;
+static TransactionId *ParallelCurrentXids;
 
 /*
  * Miscellaneous flag bits to record events which occur on the top level
@@ -1281,9 +1282,11 @@ RecordTransactionCommit(void)
 	bool		markXidCommitted = TransactionIdIsValid(xid);
 	TransactionId latestXid = InvalidTransactionId;
 	int			nrels;
-	RelFileNode *rels;
+	RelFileLocator *rels;
 	int			nchildren;
 	TransactionId *children;
+	int			ndroppedstats = 0;
+	xl_xact_stats_item *droppedstats = NULL;
 	int			nmsgs = 0;
 	SharedInvalidationMessage *invalMessages = NULL;
 	bool		RelcacheInitFileInval = false;
@@ -1302,6 +1305,7 @@ RecordTransactionCommit(void)
 	/* Get data needed for commit record */
 	nrels = smgrGetPendingDeletes(true, &rels);
 	nchildren = xactGetCommittedChildren(&children);
+	ndroppedstats = pgstat_get_transactional_drops(true, &droppedstats);
 	if (XLogStandbyInfoActive())
 		nmsgs = xactGetCommittedInvalidationMessages(&invalMessages,
 													 &RelcacheInitFileInval);
@@ -1316,10 +1320,12 @@ RecordTransactionCommit(void)
 		/*
 		 * We expect that every RelationDropStorage is followed by a catalog
 		 * update, and hence XID assignment, so we shouldn't get here with any
-		 * pending deletes.  Use a real test not just an Assert to check this,
-		 * since it's a bit fragile.
+		 * pending deletes. Same is true for dropping stats.
+		 *
+		 * Use a real test not just an Assert to check this, since it's a bit
+		 * fragile.
 		 */
-		if (nrels != 0)
+		if (nrels != 0 || ndroppedstats != 0)
 			elog(ERROR, "cannot commit a transaction that deleted files but has no xid");
 
 		/* Can't have child XIDs either; AssignTransactionId enforces this */
@@ -1381,18 +1387,20 @@ RecordTransactionCommit(void)
 		 * RecordTransactionAbort.  That's because loss of a transaction abort
 		 * is noncritical; the presumption would be that it aborted, anyway.
 		 *
-		 * It's safe to change the delayChkpt flag of our own backend without
-		 * holding the ProcArrayLock, since we're the only one modifying it.
-		 * This makes checkpoint's determination of which xacts are delayChkpt
-		 * a bit fuzzy, but it doesn't matter.
+		 * It's safe to change the delayChkptFlags flag of our own backend
+		 * without holding the ProcArrayLock, since we're the only one
+		 * modifying it.  This makes checkpoint's determination of which xacts
+		 * are delaying the checkpoint a bit fuzzy, but it doesn't matter.
 		 */
+		Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
 		START_CRIT_SECTION();
-		MyProc->delayChkpt = true;
+		MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
 		SetCurrentTransactionStopTimestamp();
 
 		XactLogCommitRecord(xactStopTimestamp,
 							nchildren, children, nrels, rels,
+							ndroppedstats, droppedstats,
 							nmsgs, invalMessages,
 							RelcacheInitFileInval,
 							MyXactFlags,
@@ -1488,7 +1496,7 @@ RecordTransactionCommit(void)
 	 */
 	if (markXidCommitted)
 	{
-		MyProc->delayChkpt = false;
+		MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 		END_CRIT_SECTION();
 	}
 
@@ -1516,6 +1524,8 @@ cleanup:
 	/* Clean up local data */
 	if (rels)
 		pfree(rels);
+	if (ndroppedstats)
+		pfree(droppedstats);
 
 	return latestXid;
 }
@@ -1695,7 +1705,9 @@ RecordTransactionAbort(bool isSubXact)
 	TransactionId xid = GetCurrentTransactionIdIfAny();
 	TransactionId latestXid;
 	int			nrels;
-	RelFileNode *rels;
+	RelFileLocator *rels;
+	int			ndroppedstats = 0;
+	xl_xact_stats_item *droppedstats = NULL;
 	int			nchildren;
 	TransactionId *children;
 	TimestampTz xact_time;
@@ -1732,6 +1744,7 @@ RecordTransactionAbort(bool isSubXact)
 	/* Fetch the data we need for the abort record */
 	nrels = smgrGetPendingDeletes(false, &rels);
 	nchildren = xactGetCommittedChildren(&children);
+	ndroppedstats = pgstat_get_transactional_drops(false, &droppedstats);
 
 	/* XXX do we really need a critical section here? */
 	START_CRIT_SECTION();
@@ -1748,6 +1761,7 @@ RecordTransactionAbort(bool isSubXact)
 	XactLogAbortRecord(xact_time,
 					   nchildren, children,
 					   nrels, rels,
+					   ndroppedstats, droppedstats,
 					   MyXactFlags, InvalidTransactionId,
 					   NULL);
 
@@ -1794,6 +1808,8 @@ RecordTransactionAbort(bool isSubXact)
 	/* And clean up local data */
 	if (rels)
 		pfree(rels);
+	if (ndroppedstats)
+		pfree(droppedstats);
 
 	return latestXid;
 }
@@ -2982,24 +2998,20 @@ StartTransactionCommand(void)
  * GUC system resets the characteristics at transaction end, so for example
  * just skipping the reset in StartTransaction() won't work.)
  */
-static int	save_XactIsoLevel;
-static bool save_XactReadOnly;
-static bool save_XactDeferrable;
-
 void
-SaveTransactionCharacteristics(void)
+SaveTransactionCharacteristics(SavedTransactionCharacteristics *s)
 {
-	save_XactIsoLevel = XactIsoLevel;
-	save_XactReadOnly = XactReadOnly;
-	save_XactDeferrable = XactDeferrable;
+	s->save_XactIsoLevel = XactIsoLevel;
+	s->save_XactReadOnly = XactReadOnly;
+	s->save_XactDeferrable = XactDeferrable;
 }
 
 void
-RestoreTransactionCharacteristics(void)
+RestoreTransactionCharacteristics(const SavedTransactionCharacteristics *s)
 {
-	XactIsoLevel = save_XactIsoLevel;
-	XactReadOnly = save_XactReadOnly;
-	XactDeferrable = save_XactDeferrable;
+	XactIsoLevel = s->save_XactIsoLevel;
+	XactReadOnly = s->save_XactReadOnly;
+	XactDeferrable = s->save_XactDeferrable;
 }
 
 
@@ -3010,9 +3022,9 @@ void
 CommitTransactionCommand(void)
 {
 	TransactionState s = CurrentTransactionState;
+	SavedTransactionCharacteristics savetc;
 
-	if (s->chain)
-		SaveTransactionCharacteristics();
+	SaveTransactionCharacteristics(&savetc);
 
 	switch (s->blockState)
 	{
@@ -3070,7 +3082,7 @@ CommitTransactionCommand(void)
 				StartTransaction();
 				s->blockState = TBLOCK_INPROGRESS;
 				s->chain = false;
-				RestoreTransactionCharacteristics();
+				RestoreTransactionCharacteristics(&savetc);
 			}
 			break;
 
@@ -3096,7 +3108,7 @@ CommitTransactionCommand(void)
 				StartTransaction();
 				s->blockState = TBLOCK_INPROGRESS;
 				s->chain = false;
-				RestoreTransactionCharacteristics();
+				RestoreTransactionCharacteristics(&savetc);
 			}
 			break;
 
@@ -3114,7 +3126,7 @@ CommitTransactionCommand(void)
 				StartTransaction();
 				s->blockState = TBLOCK_INPROGRESS;
 				s->chain = false;
-				RestoreTransactionCharacteristics();
+				RestoreTransactionCharacteristics(&savetc);
 			}
 			break;
 
@@ -3128,7 +3140,7 @@ CommitTransactionCommand(void)
 			break;
 
 			/*
-			 * We were just issued a SAVEPOINT inside a transaction block.
+			 * The user issued a SAVEPOINT inside a transaction block.
 			 * Start a subtransaction.  (DefineSavepoint already did
 			 * PushTransaction, so as to have someplace to put the SUBBEGIN
 			 * state.)
@@ -3139,7 +3151,7 @@ CommitTransactionCommand(void)
 			break;
 
 			/*
-			 * We were issued a RELEASE command, so we end the current
+			 * The user issued a RELEASE command, so we end the current
 			 * subtransaction and return to the parent transaction. The parent
 			 * might be ended too, so repeat till we find an INPROGRESS
 			 * transaction or subtransaction.
@@ -3156,7 +3168,7 @@ CommitTransactionCommand(void)
 			break;
 
 			/*
-			 * We were issued a COMMIT, so we end the current subtransaction
+			 * The user issued a COMMIT, so we end the current subtransaction
 			 * hierarchy and perform final commit. We do this by rolling up
 			 * any subtransactions into their parent, which leads to O(N^2)
 			 * operations with respect to resource owners - this isn't that
@@ -3181,7 +3193,7 @@ CommitTransactionCommand(void)
 					StartTransaction();
 					s->blockState = TBLOCK_INPROGRESS;
 					s->chain = false;
-					RestoreTransactionCharacteristics();
+					RestoreTransactionCharacteristics(&savetc);
 				}
 			}
 			else if (s->blockState == TBLOCK_PREPARE)
@@ -3441,6 +3453,9 @@ AbortCurrentTransaction(void)
  *	could issue more commands and possibly cause a failure after the statement
  *	completes).  Subtransactions are verboten too.
  *
+ *	We must also set XACT_FLAGS_NEEDIMMEDIATECOMMIT in MyXactFlags, to ensure
+ *	that postgres.c follows through by committing after the statement is done.
+ *
  *	isTopLevel: passed down from ProcessUtility to determine whether we are
  *	inside a function.  (We will always fail if this is false, but it's
  *	convenient to centralize the check here instead of making callers do it.)
@@ -3482,7 +3497,9 @@ PreventInTransactionBlock(bool isTopLevel, const char *stmtType)
 	if (CurrentTransactionState->blockState != TBLOCK_DEFAULT &&
 		CurrentTransactionState->blockState != TBLOCK_STARTED)
 		elog(FATAL, "cannot prevent transaction chain");
-	/* all okay */
+
+	/* All okay.  Set the flag to make sure the right thing happens later. */
+	MyXactFlags |= XACT_FLAGS_NEEDIMMEDIATECOMMIT;
 }
 
 /*
@@ -3578,6 +3595,13 @@ IsInTransactionBlock(bool isTopLevel)
 	if (CurrentTransactionState->blockState != TBLOCK_DEFAULT &&
 		CurrentTransactionState->blockState != TBLOCK_STARTED)
 		return true;
+
+	/*
+	 * If we tell the caller we're not in a transaction block, then inform
+	 * postgres.c that it had better commit when the statement is done.
+	 * Otherwise our report could be a lie.
+	 */
+	MyXactFlags |= XACT_FLAGS_NEEDIMMEDIATECOMMIT;
 
 	return false;
 }
@@ -5356,8 +5380,9 @@ SerializeTransactionState(Size maxsize, char *start_address)
 	{
 		if (FullTransactionIdIsValid(s->fullTransactionId))
 			workspace[i++] = XidFromFullTransactionId(s->fullTransactionId);
-		memcpy(&workspace[i], s->childXids,
-			   s->nChildXids * sizeof(TransactionId));
+		if (s->nChildXids > 0)
+			memcpy(&workspace[i], s->childXids,
+				   s->nChildXids * sizeof(TransactionId));
 		i += s->nChildXids;
 	}
 	Assert(i == nxids);
@@ -5573,7 +5598,8 @@ xactGetCommittedChildren(TransactionId **ptr)
 XLogRecPtr
 XactLogCommitRecord(TimestampTz commit_time,
 					int nsubxacts, TransactionId *subxacts,
-					int nrels, RelFileNode *rels,
+					int nrels, RelFileLocator *rels,
+					int ndroppedstats, xl_xact_stats_item *droppedstats,
 					int nmsgs, SharedInvalidationMessage *msgs,
 					bool relcacheInval,
 					int xactflags, TransactionId twophase_xid,
@@ -5583,7 +5609,8 @@ XactLogCommitRecord(TimestampTz commit_time,
 	xl_xact_xinfo xl_xinfo;
 	xl_xact_dbinfo xl_dbinfo;
 	xl_xact_subxacts xl_subxacts;
-	xl_xact_relfilenodes xl_relfilenodes;
+	xl_xact_relfilelocators xl_relfilelocators;
+	xl_xact_stats_items xl_dropped_stats;
 	xl_xact_invals xl_invals;
 	xl_xact_twophase xl_twophase;
 	xl_xact_origin xl_origin;
@@ -5636,9 +5663,15 @@ XactLogCommitRecord(TimestampTz commit_time,
 
 	if (nrels > 0)
 	{
-		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELFILENODES;
-		xl_relfilenodes.nrels = nrels;
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELFILELOCATORS;
+		xl_relfilelocators.nrels = nrels;
 		info |= XLR_SPECIAL_REL_UPDATE;
+	}
+
+	if (ndroppedstats > 0)
+	{
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
+		xl_dropped_stats.nitems = ndroppedstats;
 	}
 
 	if (nmsgs > 0)
@@ -5689,12 +5722,20 @@ XactLogCommitRecord(TimestampTz commit_time,
 						 nsubxacts * sizeof(TransactionId));
 	}
 
-	if (xl_xinfo.xinfo & XACT_XINFO_HAS_RELFILENODES)
+	if (xl_xinfo.xinfo & XACT_XINFO_HAS_RELFILELOCATORS)
 	{
-		XLogRegisterData((char *) (&xl_relfilenodes),
-						 MinSizeOfXactRelfilenodes);
+		XLogRegisterData((char *) (&xl_relfilelocators),
+						 MinSizeOfXactRelfileLocators);
 		XLogRegisterData((char *) rels,
-						 nrels * sizeof(RelFileNode));
+						 nrels * sizeof(RelFileLocator));
+	}
+
+	if (xl_xinfo.xinfo & XACT_XINFO_HAS_DROPPED_STATS)
+	{
+		XLogRegisterData((char *) (&xl_dropped_stats),
+						 MinSizeOfXactStatsItems);
+		XLogRegisterData((char *) droppedstats,
+						 ndroppedstats * sizeof(xl_xact_stats_item));
 	}
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_INVALS)
@@ -5729,14 +5770,16 @@ XactLogCommitRecord(TimestampTz commit_time,
 XLogRecPtr
 XactLogAbortRecord(TimestampTz abort_time,
 				   int nsubxacts, TransactionId *subxacts,
-				   int nrels, RelFileNode *rels,
+				   int nrels, RelFileLocator *rels,
+				   int ndroppedstats, xl_xact_stats_item *droppedstats,
 				   int xactflags, TransactionId twophase_xid,
 				   const char *twophase_gid)
 {
 	xl_xact_abort xlrec;
 	xl_xact_xinfo xl_xinfo;
 	xl_xact_subxacts xl_subxacts;
-	xl_xact_relfilenodes xl_relfilenodes;
+	xl_xact_relfilelocators xl_relfilelocators;
+	xl_xact_stats_items xl_dropped_stats;
 	xl_xact_twophase xl_twophase;
 	xl_xact_dbinfo xl_dbinfo;
 	xl_xact_origin xl_origin;
@@ -5769,9 +5812,15 @@ XactLogAbortRecord(TimestampTz abort_time,
 
 	if (nrels > 0)
 	{
-		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELFILENODES;
-		xl_relfilenodes.nrels = nrels;
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELFILELOCATORS;
+		xl_relfilelocators.nrels = nrels;
 		info |= XLR_SPECIAL_REL_UPDATE;
+	}
+
+	if (ndroppedstats > 0)
+	{
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_DROPPED_STATS;
+		xl_dropped_stats.nitems = ndroppedstats;
 	}
 
 	if (TransactionIdIsValid(twophase_xid))
@@ -5827,12 +5876,20 @@ XactLogAbortRecord(TimestampTz abort_time,
 						 nsubxacts * sizeof(TransactionId));
 	}
 
-	if (xl_xinfo.xinfo & XACT_XINFO_HAS_RELFILENODES)
+	if (xl_xinfo.xinfo & XACT_XINFO_HAS_RELFILELOCATORS)
 	{
-		XLogRegisterData((char *) (&xl_relfilenodes),
-						 MinSizeOfXactRelfilenodes);
+		XLogRegisterData((char *) (&xl_relfilelocators),
+						 MinSizeOfXactRelfileLocators);
 		XLogRegisterData((char *) rels,
-						 nrels * sizeof(RelFileNode));
+						 nrels * sizeof(RelFileLocator));
+	}
+
+	if (xl_xinfo.xinfo & XACT_XINFO_HAS_DROPPED_STATS)
+	{
+		XLogRegisterData((char *) (&xl_dropped_stats),
+						 MinSizeOfXactStatsItems);
+		XLogRegisterData((char *) droppedstats,
+						 ndroppedstats * sizeof(xl_xact_stats_item));
 	}
 
 	if (xl_xinfo.xinfo & XACT_XINFO_HAS_TWOPHASE)
@@ -5965,7 +6022,15 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 		XLogFlush(lsn);
 
 		/* Make sure files supposed to be dropped are dropped */
-		DropRelationFiles(parsed->xnodes, parsed->nrels, true);
+		DropRelationFiles(parsed->xlocators, parsed->nrels, true);
+	}
+
+	if (parsed->nstats > 0)
+	{
+		/* see equivalent call for relations above */
+		XLogFlush(lsn);
+
+		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats, true);
 	}
 
 	/*
@@ -6068,7 +6133,15 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 		 */
 		XLogFlush(lsn);
 
-		DropRelationFiles(parsed->xnodes, parsed->nrels, true);
+		DropRelationFiles(parsed->xlocators, parsed->nrels, true);
+	}
+
+	if (parsed->nstats > 0)
+	{
+		/* see equivalent call for relations above */
+		XLogFlush(lsn);
+
+		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats, true);
 	}
 }
 

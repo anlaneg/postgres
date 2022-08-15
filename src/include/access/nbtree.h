@@ -4,7 +4,7 @@
  *	  header file for postgres btree access method implementation.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/nbtree.h
@@ -69,6 +69,8 @@ typedef struct BTPageOpaqueData
 } BTPageOpaqueData;
 
 typedef BTPageOpaqueData *BTPageOpaque;
+
+#define BTPageGetOpaque(page) ((BTPageOpaque) PageGetSpecialPointer(page))
 
 /* Bits defined in btpo_flags */
 #define BTP_LEAF		(1 << 0)	/* leaf page, i.e. not internal page */
@@ -160,11 +162,10 @@ typedef struct BTMetaPageData
  * attribute, which we account for here.
  */
 #define BTMaxItemSize(page) \
-	MAXALIGN_DOWN((PageGetPageSize(page) - \
-				   MAXALIGN(SizeOfPageHeaderData + \
-							3*sizeof(ItemIdData)  + \
-							3*sizeof(ItemPointerData)) - \
-				   MAXALIGN(sizeof(BTPageOpaqueData))) / 3)
+	(MAXALIGN_DOWN((PageGetPageSize(page) - \
+					MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
+					MAXALIGN(sizeof(BTPageOpaqueData))) / 3) - \
+					MAXALIGN(sizeof(ItemPointerData)))
 #define BTMaxItemSizeNoHeapTid(page) \
 	MAXALIGN_DOWN((PageGetPageSize(page) - \
 				   MAXALIGN(SizeOfPageHeaderData + 3*sizeof(ItemIdData)) - \
@@ -241,7 +242,7 @@ BTPageSetDeleted(Page page, FullTransactionId safexid)
 	PageHeader	header;
 	BTDeletedPageData *contents;
 
-	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+	opaque = BTPageGetOpaque(page);
 	header = ((PageHeader) page);
 
 	opaque->btpo_flags &= ~BTP_HALF_DEAD;
@@ -263,7 +264,7 @@ BTPageGetDeleteXid(Page page)
 
 	/* We only expect to be called with a deleted page */
 	Assert(!PageIsNew(page));
-	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+	opaque = BTPageGetOpaque(page);
 	Assert(P_ISDELETED(opaque));
 
 	/* pg_upgrade'd deleted page -- must be safe to delete now */
@@ -294,7 +295,7 @@ BTPageIsRecyclable(Page page)
 	Assert(!PageIsNew(page));
 
 	/* Recycling okay iff page is deleted and safexid is old enough */
-	opaque = (BTPageOpaque) PageGetSpecialPointer(page);
+	opaque = BTPageGetOpaque(page);
 	if (P_ISDELETED(opaque))
 	{
 		/*

@@ -261,7 +261,6 @@ static const TclExceptionNameMap exception_name_map[] = {
 /**********************************************************************
  * Forward declarations
  **********************************************************************/
-void		_PG_init(void);
 
 static void pltcl_init_interp(pltcl_interp_desc *interp_desc,
 							  Oid prolang, bool pltrusted);
@@ -473,6 +472,9 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET, 0,
 							   NULL, NULL, NULL);
+
+	MarkGUCPrefixReserved("pltcl");
+	MarkGUCPrefixReserved("pltclu");
 
 	pltcl_pm_init_done = true;
 }
@@ -826,11 +828,15 @@ pltcl_func_handler(PG_FUNCTION_ARGS, pltcl_call_state *call_state,
 	{
 		ReturnSetInfo *rsi = (ReturnSetInfo *) fcinfo->resultinfo;
 
-		if (!rsi || !IsA(rsi, ReturnSetInfo) ||
-			(rsi->allowedModes & SFRM_Materialize) == 0)
+		if (!rsi || !IsA(rsi, ReturnSetInfo))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("set-valued function called in context that cannot accept a set")));
+
+		if (!(rsi->allowedModes & SFRM_Materialize))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("materialize mode required, but it is not allowed in this context")));
 
 		call_state->rsi = rsi;
 		call_state->tuple_store_cxt = rsi->econtext->ecxt_per_query_memory;
@@ -1236,7 +1242,6 @@ pltcl_trigger_handler(PG_FUNCTION_ARGS, pltcl_call_state *call_state,
 		for (i = 0; i < trigdata->tg_trigger->tgnargs; i++)
 			Tcl_ListObjAppendElement(NULL, tcl_cmd,
 									 Tcl_NewStringObj(utf_e2u(trigdata->tg_trigger->tgargs[i]), -1));
-
 	}
 	PG_CATCH();
 	{
@@ -2928,7 +2933,6 @@ pltcl_commit(ClientData cdata, Tcl_Interp *interp,
 	PG_TRY();
 	{
 		SPI_commit();
-		SPI_start_transaction();
 	}
 	PG_CATCH();
 	{
@@ -2968,7 +2972,6 @@ pltcl_rollback(ClientData cdata, Tcl_Interp *interp,
 	PG_TRY();
 	{
 		SPI_rollback();
-		SPI_start_transaction();
 	}
 	PG_CATCH();
 	{

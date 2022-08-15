@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Copyright (c) 2000-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2022, PostgreSQL Global Development Group
  *
  * src/bin/psql/copy.c
  */
@@ -389,8 +389,7 @@ do_copy(const char *args)
 
 					pg_log_error("%s: %s", options->file,
 								 reason ? reason : "");
-					if (reason)
-						free(reason);
+					free(reason);
 				}
 				success = false;
 			}
@@ -653,7 +652,8 @@ handleCopyIn(PGconn *conn, FILE *copystream, bool isbinary, PGresult **res)
 			 *
 			 * Make sure there's always space for four more bytes in the
 			 * buffer, plus a NUL terminator.  That way, an EOF marker is
-			 * never split across two fgets() calls, which simplies the logic.
+			 * never split across two fgets() calls, which simplifies the
+			 * logic.
 			 */
 			if (buflen >= COPYBUFSIZ - 5 || (copydone && buflen > 0))
 			{

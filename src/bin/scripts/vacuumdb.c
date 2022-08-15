@@ -2,7 +2,7 @@
  *
  * vacuumdb
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/bin/scripts/vacuumdb.c
@@ -46,11 +46,23 @@ typedef struct vacuumingOptions
 	bool		process_toast;
 } vacuumingOptions;
 
+/* object filter options */
+typedef enum
+{
+	OBJFILTER_NONE = 0,					/* no filter used */
+	OBJFILTER_ALL_DBS = (1 << 0),		/* -a | --all */
+	OBJFILTER_DATABASE = (1 << 1),		/* -d | --dbname */
+	OBJFILTER_TABLE = (1 << 2),			/* -t | --table */
+	OBJFILTER_SCHEMA = (1 << 3),		/* -n | --schema */
+	OBJFILTER_SCHEMA_EXCLUDE = (1 << 4)	/* -N | --exclude-schema */
+} VacObjFilter;
+
+VacObjFilter objfilter = OBJFILTER_NONE;
 
 static void vacuum_one_database(ConnParams *cparams,
 								vacuumingOptions *vacopts,
 								int stage,
-								SimpleStringList *tables,
+								SimpleStringList *objects,
 								int concurrentCons,
 								const char *progname, bool echo, bool quiet);
 
@@ -67,6 +79,8 @@ static void run_vacuum_command(PGconn *conn, const char *sql, bool echo,
 							   const char *table);
 
 static void help(const char *progname);
+
+void check_objfilter(void);
 
 /* For analyze-in-stages mode */
 #define ANALYZE_NO_STAGE	-1
@@ -94,6 +108,8 @@ main(int argc, char *argv[])
 		{"verbose", no_argument, NULL, 'v'},
 		{"jobs", required_argument, NULL, 'j'},
 		{"parallel", required_argument, NULL, 'P'},
+		{"schema", required_argument, NULL, 'n'},
+		{"exclude-schema", required_argument, NULL, 'N'},
 		{"maintenance-db", required_argument, NULL, 2},
 		{"analyze-in-stages", no_argument, NULL, 3},
 		{"disable-page-skipping", no_argument, NULL, 4},
@@ -121,8 +137,7 @@ main(int argc, char *argv[])
 	bool		quiet = false;
 	vacuumingOptions vacopts;
 	bool		analyze_in_stages = false;
-	bool		alldb = false;
-	SimpleStringList tables = {NULL, NULL};
+	SimpleStringList objects = {NULL, NULL};
 	int			concurrentCons = 1;
 	int			tbl_count = 0;
 
@@ -140,7 +155,7 @@ main(int argc, char *argv[])
 
 	handle_help_version_opts(argc, argv, "vacuumdb", help);
 
-	while ((c = getopt_long(argc, argv, "h:p:U:wWeqd:zZFat:fvj:P:", long_options, &optindex)) != -1)
+	while ((c = getopt_long(argc, argv, "h:p:U:wWeqd:zZFat:fvj:P:n:N:", long_options, &optindex)) != -1)
 	{
 		switch (c)
 		{
@@ -166,6 +181,7 @@ main(int argc, char *argv[])
 				quiet = true;
 				break;
 			case 'd':
+				objfilter |= OBJFILTER_DATABASE;
 				dbname = pg_strdup(optarg);
 				break;
 			case 'z':
@@ -178,11 +194,12 @@ main(int argc, char *argv[])
 				vacopts.freeze = true;
 				break;
 			case 'a':
-				alldb = true;
+				objfilter |= OBJFILTER_ALL_DBS;
 				break;
 			case 't':
 				{
-					simple_string_list_append(&tables, optarg);
+					objfilter |= OBJFILTER_TABLE;
+					simple_string_list_append(&objects, optarg);
 					tbl_count++;
 					break;
 				}
@@ -202,6 +219,18 @@ main(int argc, char *argv[])
 									  &vacopts.parallel_workers))
 					exit(1);
 				break;
+			case 'n':
+				{
+					objfilter |= OBJFILTER_SCHEMA;
+					simple_string_list_append(&objects, optarg);
+					break;
+				}
+			case 'N':
+				{
+					objfilter |= OBJFILTER_SCHEMA_EXCLUDE;
+					simple_string_list_append(&objects, optarg);
+					break;
+				}
 			case 2:
 				maintenance_db = pg_strdup(optarg);
 				break;
@@ -237,7 +266,8 @@ main(int argc, char *argv[])
 				vacopts.process_toast = false;
 				break;
 			default:
-				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+				/* getopt_long already emitted a complaint */
+				pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 				exit(1);
 		}
 	}
@@ -248,6 +278,7 @@ main(int argc, char *argv[])
 	 */
 	if (optind < argc && dbname == NULL)
 	{
+		objfilter |= OBJFILTER_DATABASE;
 		dbname = argv[optind];
 		optind++;
 	}
@@ -256,54 +287,39 @@ main(int argc, char *argv[])
 	{
 		pg_log_error("too many command-line arguments (first is \"%s\")",
 					 argv[optind]);
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+		pg_log_error_hint("Try \"%s --help\" for more information.", progname);
 		exit(1);
 	}
+
+	/*
+	 * Validate the combination of filters specified in the command-line
+	 * options.
+	 */
+	check_objfilter();
 
 	if (vacopts.analyze_only)
 	{
 		if (vacopts.full)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "full");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "full");
 		if (vacopts.freeze)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "freeze");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "freeze");
 		if (vacopts.disable_page_skipping)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "disable-page-skipping");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "disable-page-skipping");
 		if (vacopts.no_index_cleanup)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "no-index-cleanup");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "no-index-cleanup");
 		if (vacopts.force_index_cleanup)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "force-index-cleanup");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "force-index-cleanup");
 		if (!vacopts.do_truncate)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "no-truncate");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "no-truncate");
 		if (!vacopts.process_toast)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "no-process-toast");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "no-process-toast");
 		/* allow 'and_analyze' with 'analyze_only' */
 	}
 
@@ -311,26 +327,17 @@ main(int argc, char *argv[])
 	if (vacopts.parallel_workers >= 0)
 	{
 		if (vacopts.analyze_only)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing only analyze",
-						 "parallel");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing only analyze",
+					 "parallel");
 		if (vacopts.full)
-		{
-			pg_log_error("cannot use the \"%s\" option when performing full vacuum",
-						 "parallel");
-			exit(1);
-		}
+			pg_fatal("cannot use the \"%s\" option when performing full vacuum",
+					 "parallel");
 	}
 
 	/* Prohibit --no-index-cleanup and --force-index-cleanup together */
 	if (vacopts.no_index_cleanup && vacopts.force_index_cleanup)
-	{
-		pg_log_error("cannot use the \"%s\" option with the \"%s\" option",
-					 "no-index-cleanup", "force-index-cleanup");
-		exit(1);
-	}
+		pg_fatal("cannot use the \"%s\" option with the \"%s\" option",
+				 "no-index-cleanup", "force-index-cleanup");
 
 	/* fill cparams except for dbname, which is set below */
 	cparams.pghost = host;
@@ -345,19 +352,8 @@ main(int argc, char *argv[])
 	if (tbl_count && (concurrentCons > tbl_count))
 		concurrentCons = tbl_count;
 
-	if (alldb)
+	if (objfilter & OBJFILTER_ALL_DBS)
 	{
-		if (dbname)
-		{
-			pg_log_error("cannot vacuum all databases and a specific one at the same time");
-			exit(1);
-		}
-		if (tables.head != NULL)
-		{
-			pg_log_error("cannot vacuum specific table(s) in all databases");
-			exit(1);
-		}
-
 		cparams.dbname = maintenance_db;
 
 		vacuum_all_databases(&cparams, &vacopts,
@@ -387,7 +383,7 @@ main(int argc, char *argv[])
 			{
 				vacuum_one_database(&cparams, &vacopts,
 									stage,
-									&tables,
+									&objects,
 									concurrentCons,
 									progname, echo, quiet);
 			}
@@ -395,12 +391,47 @@ main(int argc, char *argv[])
 		else
 			vacuum_one_database(&cparams, &vacopts,
 								ANALYZE_NO_STAGE,
-								&tables,
+								&objects,
 								concurrentCons,
 								progname, echo, quiet);
 	}
 
 	exit(0);
+}
+
+/*
+ * Verify that the filters used at command line are compatible.
+ */
+void
+check_objfilter(void)
+{
+	if ((objfilter & OBJFILTER_ALL_DBS) &&
+		(objfilter & OBJFILTER_DATABASE))
+		pg_fatal("cannot vacuum all databases and a specific one at the same time");
+
+	if ((objfilter & OBJFILTER_ALL_DBS) &&
+		(objfilter & OBJFILTER_TABLE))
+		pg_fatal("cannot vacuum specific table(s) in all databases");
+
+	if ((objfilter & OBJFILTER_ALL_DBS) &&
+		(objfilter & OBJFILTER_SCHEMA))
+		pg_fatal("cannot vacuum specific schema(s) in all databases");
+
+	if ((objfilter & OBJFILTER_ALL_DBS) &&
+		(objfilter & OBJFILTER_SCHEMA_EXCLUDE))
+		pg_fatal("cannot exclude specific schema(s) in all databases");
+
+	if ((objfilter & OBJFILTER_TABLE) &&
+		(objfilter & OBJFILTER_SCHEMA))
+		pg_fatal("cannot vacuum all tables in schema(s) and specific table(s) at the same time");
+
+	if ((objfilter & OBJFILTER_TABLE) &&
+		(objfilter & OBJFILTER_SCHEMA_EXCLUDE))
+		pg_fatal("cannot vacuum specific table(s) and exclude schema(s) at the same time");
+
+	if ((objfilter & OBJFILTER_SCHEMA) &&
+		(objfilter & OBJFILTER_SCHEMA_EXCLUDE))
+		pg_fatal("cannot vacuum all tables in schema(s) and exclude schema(s) at the same time");
 }
 
 /*
@@ -420,7 +451,7 @@ static void
 vacuum_one_database(ConnParams *cparams,
 					vacuumingOptions *vacopts,
 					int stage,
-					SimpleStringList *tables,
+					SimpleStringList *objects,
 					int concurrentCons,
 					const char *progname, bool echo, bool quiet)
 {
@@ -435,7 +466,7 @@ vacuum_one_database(ConnParams *cparams,
 	int			i;
 	int			ntups;
 	bool		failed = false;
-	bool		tables_listed = false;
+	bool		objects_listed = false;
 	bool		has_where = false;
 	const char *initcmd;
 	const char *stage_commands[] = {
@@ -457,71 +488,56 @@ vacuum_one_database(ConnParams *cparams,
 	if (vacopts->disable_page_skipping && PQserverVersion(conn) < 90600)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "disable-page-skipping", "9.6");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "disable-page-skipping", "9.6");
 	}
 
 	if (vacopts->no_index_cleanup && PQserverVersion(conn) < 120000)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "no-index-cleanup", "12");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "no-index-cleanup", "12");
 	}
 
 	if (vacopts->force_index_cleanup && PQserverVersion(conn) < 120000)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "force-index-cleanup", "12");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "force-index-cleanup", "12");
 	}
 
 	if (!vacopts->do_truncate && PQserverVersion(conn) < 120000)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "no-truncate", "12");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "no-truncate", "12");
 	}
 
 	if (!vacopts->process_toast && PQserverVersion(conn) < 140000)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "no-process-toast", "14");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "no-process-toast", "14");
 	}
 
 	if (vacopts->skip_locked && PQserverVersion(conn) < 120000)
 	{
 		PQfinish(conn);
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "skip-locked", "12");
-		exit(1);
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "skip-locked", "12");
 	}
 
 	if (vacopts->min_xid_age != 0 && PQserverVersion(conn) < 90600)
-	{
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "--min-xid-age", "9.6");
-		exit(1);
-	}
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "--min-xid-age", "9.6");
 
 	if (vacopts->min_mxid_age != 0 && PQserverVersion(conn) < 90600)
-	{
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "--min-mxid-age", "9.6");
-		exit(1);
-	}
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "--min-mxid-age", "9.6");
 
 	if (vacopts->parallel_workers >= 0 && PQserverVersion(conn) < 130000)
-	{
-		pg_log_error("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
-					 "--parallel", "13");
-		exit(1);
-	}
+		pg_fatal("cannot use the \"%s\" option on server versions older than PostgreSQL %s",
+				 "--parallel", "13");
 
 	if (!quiet)
 	{
@@ -549,31 +565,41 @@ vacuum_one_database(ConnParams *cparams,
 	 * catalog query will fail.
 	 */
 	initPQExpBuffer(&catalog_query);
-	for (cell = tables ? tables->head : NULL; cell; cell = cell->next)
+	for (cell = objects ? objects->head : NULL; cell; cell = cell->next)
 	{
-		char	   *just_table;
-		const char *just_columns;
+		char	   *just_table = NULL;
+		const char *just_columns = NULL;
 
-		/*
-		 * Split relation and column names given by the user, this is used to
-		 * feed the CTE with values on which are performed pre-run validity
-		 * checks as well.  For now these happen only on the relation name.
-		 */
-		splitTableColumnsSpec(cell->val, PQclientEncoding(conn),
-							  &just_table, &just_columns);
-
-		if (!tables_listed)
+		if (!objects_listed)
 		{
 			appendPQExpBufferStr(&catalog_query,
-								 "WITH listed_tables (table_oid, column_list) "
+								 "WITH listed_objects (object_oid, column_list) "
 								 "AS (\n  VALUES (");
-			tables_listed = true;
+			objects_listed = true;
 		}
 		else
 			appendPQExpBufferStr(&catalog_query, ",\n  (");
 
-		appendStringLiteralConn(&catalog_query, just_table, conn);
-		appendPQExpBufferStr(&catalog_query, "::pg_catalog.regclass, ");
+		if (objfilter & (OBJFILTER_SCHEMA | OBJFILTER_SCHEMA_EXCLUDE))
+		{
+			appendStringLiteralConn(&catalog_query, cell->val, conn);
+			appendPQExpBufferStr(&catalog_query, "::pg_catalog.regnamespace, ");
+		}
+
+		if (objfilter & OBJFILTER_TABLE)
+		{
+			/*
+			 * Split relation and column names given by the user, this is used
+			 * to feed the CTE with values on which are performed pre-run
+			 * validity checks as well.  For now these happen only on the
+			 * relation name.
+			 */
+			splitTableColumnsSpec(cell->val, PQclientEncoding(conn),
+								  &just_table, &just_columns);
+
+			appendStringLiteralConn(&catalog_query, just_table, conn);
+			appendPQExpBufferStr(&catalog_query, "::pg_catalog.regclass, ");
+		}
 
 		if (just_columns && just_columns[0] != '\0')
 			appendStringLiteralConn(&catalog_query, just_columns, conn);
@@ -586,13 +612,13 @@ vacuum_one_database(ConnParams *cparams,
 	}
 
 	/* Finish formatting the CTE */
-	if (tables_listed)
+	if (objects_listed)
 		appendPQExpBufferStr(&catalog_query, "\n)\n");
 
 	appendPQExpBufferStr(&catalog_query, "SELECT c.relname, ns.nspname");
 
-	if (tables_listed)
-		appendPQExpBufferStr(&catalog_query, ", listed_tables.column_list");
+	if (objects_listed)
+		appendPQExpBufferStr(&catalog_query, ", listed_objects.column_list");
 
 	appendPQExpBufferStr(&catalog_query,
 						 " FROM pg_catalog.pg_class c\n"
@@ -601,10 +627,22 @@ vacuum_one_database(ConnParams *cparams,
 						 " LEFT JOIN pg_catalog.pg_class t"
 						 " ON c.reltoastrelid OPERATOR(pg_catalog.=) t.oid\n");
 
-	/* Used to match the tables listed by the user */
-	if (tables_listed)
-		appendPQExpBufferStr(&catalog_query, " JOIN listed_tables"
-							 " ON listed_tables.table_oid OPERATOR(pg_catalog.=) c.oid\n");
+	/* Used to match the tables or schemas listed by the user */
+	if (objects_listed)
+	{
+		appendPQExpBufferStr(&catalog_query, " JOIN listed_objects"
+							 " ON listed_objects.object_oid ");
+
+		if (objfilter & OBJFILTER_SCHEMA_EXCLUDE)
+			appendPQExpBufferStr(&catalog_query, "OPERATOR(pg_catalog.!=) ");
+		else
+			appendPQExpBufferStr(&catalog_query, "OPERATOR(pg_catalog.=) ");
+
+		if (objfilter & OBJFILTER_TABLE)
+			appendPQExpBufferStr(&catalog_query, "c.oid\n");
+		else
+			appendPQExpBufferStr(&catalog_query, "ns.oid\n");
+	}
 
 	/*
 	 * If no tables were listed, filter for the relevant relation types.  If
@@ -612,7 +650,7 @@ vacuum_one_database(ConnParams *cparams,
 	 * Instead, let the server decide whether a given relation can be
 	 * processed in which case the user will know about it.
 	 */
-	if (!tables_listed)
+	if ((objfilter & OBJFILTER_TABLE) == 0)
 	{
 		appendPQExpBufferStr(&catalog_query, " WHERE c.relkind OPERATOR(pg_catalog.=) ANY (array["
 							 CppAsString2(RELKIND_RELATION) ", "
@@ -683,7 +721,7 @@ vacuum_one_database(ConnParams *cparams,
 							 fmtQualifiedId(PQgetvalue(res, i, 1),
 											PQgetvalue(res, i, 0)));
 
-		if (tables_listed && !PQgetisnull(res, i, 2))
+		if (objects_listed && !PQgetisnull(res, i, 2))
 			appendPQExpBufferStr(&buf, PQgetvalue(res, i, 2));
 
 		simple_string_list_append(&dbtables, buf.data);
@@ -1027,6 +1065,8 @@ help(const char *progname)
 	printf(_("      --no-index-cleanup          don't remove index entries that point to dead tuples\n"));
 	printf(_("      --no-process-toast          skip the TOAST table associated with the table to vacuum\n"));
 	printf(_("      --no-truncate               don't truncate empty pages at the end of the table\n"));
+	printf(_("  -n, --schema=PATTERN            vacuum tables in the specified schema(s) only\n"));
+	printf(_("  -N, --exclude-schema=PATTERN    do not vacuum tables in the specified schema(s)\n"));
 	printf(_("  -P, --parallel=PARALLEL_WORKERS use this many background workers for vacuum, if available\n"));
 	printf(_("  -q, --quiet                     don't write any messages\n"));
 	printf(_("      --skip-locked               skip relations that cannot be immediately locked\n"));

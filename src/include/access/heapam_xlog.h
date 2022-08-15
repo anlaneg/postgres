@@ -4,7 +4,7 @@
  *	  POSTGRES heap access XLOG definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/heapam_xlog.h
@@ -19,7 +19,7 @@
 #include "lib/stringinfo.h"
 #include "storage/buf.h"
 #include "storage/bufpage.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "utils/relcache.h"
 
 
@@ -370,9 +370,9 @@ typedef struct xl_heap_new_cid
 	CommandId	combocid;		/* just for debugging */
 
 	/*
-	 * Store the relfilenode/ctid pair to facilitate lookups.
+	 * Store the relfilelocator/ctid pair to facilitate lookups.
 	 */
-	RelFileNode target_node;
+	RelFileLocator target_locator;
 	ItemPointerData target_tid;
 } xl_heap_new_cid;
 
@@ -410,10 +410,12 @@ extern bool heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									  TransactionId cutoff_xid,
 									  TransactionId cutoff_multi,
 									  xl_heap_freeze_tuple *frz,
-									  bool *totally_frozen);
+									  bool *totally_frozen,
+									  TransactionId *relfrozenxid_out,
+									  MultiXactId *relminmxid_out);
 extern void heap_execute_freeze_tuple(HeapTupleHeader tuple,
 									  xl_heap_freeze_tuple *xlrec_tp);
-extern XLogRecPtr log_heap_visible(RelFileNode rnode, Buffer heap_buffer,
+extern XLogRecPtr log_heap_visible(RelFileLocator rlocator, Buffer heap_buffer,
 								   Buffer vm_buffer, TransactionId cutoff_xid, uint8 flags);
 
 #endif							/* HEAPAM_XLOG_H */

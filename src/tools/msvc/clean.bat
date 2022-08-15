@@ -4,8 +4,9 @@ REM src/tools/msvc/clean.bat
 set DIST=0
 if "%1"=="dist" set DIST=1
 
-set D=%CD%
-if exist ..\msvc if exist ..\..\..\src cd ..\..\..
+setlocal
+
+cd "%~dp0\..\..\.."
 
 if exist debug rd /s /q debug
 if exist release rd /s /q release
@@ -41,6 +42,7 @@ if exist src\include\pg_config.h del /q src\include\pg_config.h
 if exist src\include\pg_config_ext.h del /q src\include\pg_config_ext.h
 if exist src\include\pg_config_os.h del /q src\include\pg_config_os.h
 if %DIST%==1 if exist src\backend\parser\gram.h del /q src\backend\parser\gram.h
+if exist src\include\nodes\nodetags.h del /q src\include\nodes\nodetags.h
 if exist src\include\utils\errcodes.h del /q src\include\utils\errcodes.h
 if exist src\include\utils\fmgroids.h del /q src\include\utils\fmgroids.h
 if exist src\include\utils\fmgrprotos.h del /q src\include\utils\fmgrprotos.h
@@ -57,6 +59,7 @@ if %DIST%==1 if exist src\backend\utils\fmgrprotos.h del /q src\backend\utils\fm
 if %DIST%==1 if exist src\backend\utils\fmgrtab.c del /q src\backend\utils\fmgrtab.c
 if %DIST%==1 if exist src\backend\utils\fmgr-stamp del /q src\backend\utils\fmgr-stamp
 if %DIST%==1 if exist src\backend\utils\errcodes.h del /q src\backend\utils\errcodes.h
+if %DIST%==1 if exist src\backend\nodes\nodetags.h del /q src\backend\nodes\nodetags.h
 if %DIST%==1 if exist src\backend\storage\lmgr\lwlocknames.c del /q src\backend\storage\lmgr\lwlocknames.c
 if %DIST%==1 if exist src\backend\storage\lmgr\lwlocknames.h del /q src\backend\storage\lmgr\lwlocknames.h
 if %DIST%==1 if exist src\pl\plpython\spiexceptions.h del /q src\pl\plpython\spiexceptions.h
@@ -133,7 +136,7 @@ REM Clean up datafiles built with contrib
 REM cd contrib
 REM for /r %%f in (*.sql) do if exist %%f.in del %%f
 
-cd %D%
+cd "%~dp0"
 
 REM Clean up ecpg regression test files
 msbuild ecpg_regression.proj /NoLogo /v:q %MSBFLAGS% /t:clean

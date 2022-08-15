@@ -6,7 +6,7 @@
  * Note this is read in MinGW as well as native Windows builds,
  * but not in Cygwin builds.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/port/win32_port.h
@@ -179,16 +179,10 @@
 #define SIGUSR1				30
 #define SIGUSR2				31
 
-/*
- * New versions of MinGW have gettimeofday() and also declare
- * struct timezone to support it.
- */
-#ifndef HAVE_GETTIMEOFDAY
-struct timezone
-{
-	int			tz_minuteswest; /* Minutes west of GMT.  */
-	int			tz_dsttime;		/* Nonzero if DST is ever in effect.  */
-};
+/* MinGW has gettimeofday(), but MSVC doesn't */
+#ifdef _MSC_VER
+/* Last parameter not used */
+extern int	gettimeofday(struct timeval *tp, void *tzp);
 #endif
 
 /* for setitimer in backend/port/win32/timer.c */
@@ -230,7 +224,6 @@ int			setitimer(int which, const struct itimerval *value, struct itimerval *oval
  */
 extern int	pgsymlink(const char *oldpath, const char *newpath);
 extern int	pgreadlink(const char *path, char *buf, size_t size);
-extern bool pgwin32_is_junction(const char *path);
 
 #define symlink(oldpath, newpath)	pgsymlink(oldpath, newpath)
 #define readlink(path, buf, size)	pgreadlink(path, buf, size)
@@ -278,10 +271,11 @@ struct stat						/* This should match struct __stat64 */
 
 extern int	_pgfstat64(int fileno, struct stat *buf);
 extern int	_pgstat64(const char *name, struct stat *buf);
+extern int	_pglstat64(const char *name, struct stat *buf);
 
 #define fstat(fileno, sb)	_pgfstat64(fileno, sb)
 #define stat(path, sb)		_pgstat64(path, sb)
-#define lstat(path, sb)		_pgstat64(path, sb)
+#define lstat(path, sb)		_pglstat64(path, sb)
 
 /* These macros are not provided by older MinGW, nor by MSVC */
 #ifndef S_IRUSR
@@ -326,6 +320,21 @@ extern int	_pgstat64(const char *name, struct stat *buf);
 #ifndef S_ISREG
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #endif
+
+/*
+ * In order for lstat() to be able to report junction points as symlinks, we
+ * need to hijack a bit in st_mode, since neither MSVC nor MinGW provides
+ * S_ISLNK and there aren't any spare bits.  We'll steal the one for character
+ * devices, because we don't otherwise make use of those.
+ */
+#ifdef S_ISLNK
+#error "S_ISLNK is already defined"
+#endif
+#ifdef S_IFLNK
+#error "S_IFLNK is already defined"
+#endif
+#define S_IFLNK S_IFCHR
+#define S_ISLNK(m) (((m) & S_IFLNK) == S_IFLNK)
 
 /*
  * Supplement to <fcntl.h>.
@@ -449,16 +458,16 @@ extern char *pgwin32_setlocale(int category, const char *locale);
 /* In backend/port/win32/signal.c */
 extern PGDLLIMPORT volatile int pg_signal_queue;
 extern PGDLLIMPORT int pg_signal_mask;
-extern HANDLE pgwin32_signal_event;
-extern HANDLE pgwin32_initial_signal_pipe;
+extern PGDLLIMPORT HANDLE pgwin32_signal_event;
+extern PGDLLIMPORT HANDLE pgwin32_initial_signal_pipe;
 
 #define UNBLOCKED_SIGNAL_QUEUE()	(pg_signal_queue & ~pg_signal_mask)
 #define PG_SIGNAL_COUNT 32
 
-void		pgwin32_signal_initialize(void);
-HANDLE		pgwin32_create_signal_listener(pid_t pid);
-void		pgwin32_dispatch_queued_signals(void);
-void		pg_queue_signal(int signum);
+extern void pgwin32_signal_initialize(void);
+extern HANDLE pgwin32_create_signal_listener(pid_t pid);
+extern void pgwin32_dispatch_queued_signals(void);
+extern void pg_queue_signal(int signum);
 
 /* In src/port/kill.c */
 #define kill(pid,sig)	pgkill(pid,sig)
@@ -475,17 +484,17 @@ extern int	pgkill(int pid, int sig);
 #define recv(s, buf, len, flags) pgwin32_recv(s, buf, len, flags)
 #define send(s, buf, len, flags) pgwin32_send(s, buf, len, flags)
 
-SOCKET		pgwin32_socket(int af, int type, int protocol);
-int			pgwin32_bind(SOCKET s, struct sockaddr *addr, int addrlen);
-int			pgwin32_listen(SOCKET s, int backlog);
-SOCKET		pgwin32_accept(SOCKET s, struct sockaddr *addr, int *addrlen);
-int			pgwin32_connect(SOCKET s, const struct sockaddr *name, int namelen);
-int			pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timeval *timeout);
-int			pgwin32_recv(SOCKET s, char *buf, int len, int flags);
-int			pgwin32_send(SOCKET s, const void *buf, int len, int flags);
-int			pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout);
+extern SOCKET pgwin32_socket(int af, int type, int protocol);
+extern int	pgwin32_bind(SOCKET s, struct sockaddr *addr, int addrlen);
+extern int	pgwin32_listen(SOCKET s, int backlog);
+extern SOCKET pgwin32_accept(SOCKET s, struct sockaddr *addr, int *addrlen);
+extern int	pgwin32_connect(SOCKET s, const struct sockaddr *name, int namelen);
+extern int	pgwin32_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, const struct timeval *timeout);
+extern int	pgwin32_recv(SOCKET s, char *buf, int len, int flags);
+extern int	pgwin32_send(SOCKET s, const void *buf, int len, int flags);
+extern int	pgwin32_waitforsinglesocket(SOCKET s, int what, int timeout);
 
-extern int	pgwin32_noblock;
+extern PGDLLIMPORT int pgwin32_noblock;
 
 #endif							/* FRONTEND */
 
@@ -494,6 +503,15 @@ extern int	pgwin32_ReserveSharedMemoryRegion(HANDLE);
 
 /* in backend/port/win32/crashdump.c */
 extern void pgwin32_install_crashdump_handler(void);
+
+/* in port/win32dlopen.c */
+extern void *dlopen(const char *file, int mode);
+extern void *dlsym(void *handle, const char *symbol);
+extern int	dlclose(void *handle);
+extern char *dlerror(void);
+
+#define RTLD_NOW 1
+#define RTLD_GLOBAL 0
 
 /* in port/win32error.c */
 extern void _dosmaperr(unsigned long);
@@ -529,18 +547,10 @@ typedef unsigned short mode_t;
 #define W_OK 2
 #define R_OK 4
 
-/* Pulled from Makefile.port in MinGW */
-#define DLSUFFIX ".dll"
-
 #endif							/* _MSC_VER */
 
-#if (defined(_MSC_VER) && (_MSC_VER < 1900)) || \
-	defined(__MINGW32__) || defined(__MINGW64__)
+#if defined(__MINGW32__) || defined(__MINGW64__)
 /*
- * VS2013 has a strtof() that seems to give correct answers for valid input,
- * even on the rounding edge cases, but which doesn't handle out-of-range
- * input correctly. Work around that.
- *
  * Mingw claims to have a strtof, and my reading of its source code suggests
  * that it ought to work (and not need this hack), but the regression test
  * results disagree with me; whether this is a version issue or not is not
@@ -552,5 +562,11 @@ typedef unsigned short mode_t;
  */
 #define HAVE_BUGGY_STRTOF 1
 #endif
+
+/* in port/win32pread.c */
+extern ssize_t pread(int fd, void *buf, size_t nbyte, off_t offset);
+
+/* in port/win32pwrite.c */
+extern ssize_t pwrite(int fd, const void *buf, size_t nbyte, off_t offset);
 
 #endif							/* PG_WIN32_PORT_H */

@@ -3,7 +3,7 @@
  * twophase.c
  *		Two-phase commit support functions.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -204,7 +204,9 @@ static void RecordTransactionCommitPrepared(TransactionId xid,
 											int nchildren,
 											TransactionId *children,
 											int nrels,
-											RelFileNode *rels,
+											RelFileLocator *rels,
+											int nstats,
+											xl_xact_stats_item *stats,
 											int ninvalmsgs,
 											SharedInvalidationMessage *invalmsgs,
 											bool initfileinval,
@@ -213,7 +215,9 @@ static void RecordTransactionAbortPrepared(TransactionId xid,
 										   int nchildren,
 										   TransactionId *children,
 										   int nrels,
-										   RelFileNode *rels,
+										   RelFileLocator *rels,
+										   int nstats,
+										   xl_xact_stats_item *stats,
 										   const char *gid);
 static void ProcessRecords(char *bufptr, TransactionId xid,
 						   const TwoPhaseCallback callbacks[]);
@@ -474,7 +478,7 @@ MarkAsPreparingGuts(GlobalTransaction gxact, TransactionId xid, const char *gid,
 	}
 	proc->xid = xid;
 	Assert(proc->xmin == InvalidTransactionId);
-	proc->delayChkpt = false;
+	proc->delayChkptFlags = 0;
 	proc->statusFlags = 0;
 	proc->pid = 0;
 	proc->databaseId = databaseid;
@@ -776,8 +780,8 @@ pg_prepared_xact(PG_FUNCTION_ARGS)
 	{
 		GlobalTransaction gxact = &status->array[status->currIdx++];
 		PGPROC	   *proc = &ProcGlobal->allProcs[gxact->pgprocno];
-		Datum		values[5];
-		bool		nulls[5];
+		Datum		values[5] = {0};
+		bool		nulls[5] = {0};
 		HeapTuple	tuple;
 		Datum		result;
 
@@ -787,8 +791,6 @@ pg_prepared_xact(PG_FUNCTION_ARGS)
 		/*
 		 * Form tuple with appropriate data.
 		 */
-		MemSet(values, 0, sizeof(values));
-		MemSet(nulls, 0, sizeof(nulls));
 
 		values[0] = TransactionIdGetDatum(proc->xid);
 		values[1] = CStringGetTextDatum(gxact->gid);
@@ -947,8 +949,8 @@ TwoPhaseGetDummyProc(TransactionId xid, bool lock_held)
  *
  *	1. TwoPhaseFileHeader
  *	2. TransactionId[] (subtransactions)
- *	3. RelFileNode[] (files to be deleted at commit)
- *	4. RelFileNode[] (files to be deleted at abort)
+ *	3. RelFileLocator[] (files to be deleted at commit)
+ *	4. RelFileLocator[] (files to be deleted at abort)
  *	5. SharedInvalidationMessage[] (inval messages to be sent at commit)
  *	6. TwoPhaseRecordOnDisk
  *	7. ...
@@ -1043,8 +1045,10 @@ StartPrepare(GlobalTransaction gxact)
 	TransactionId xid = gxact->xid;
 	TwoPhaseFileHeader hdr;
 	TransactionId *children;
-	RelFileNode *commitrels;
-	RelFileNode *abortrels;
+	RelFileLocator *commitrels;
+	RelFileLocator *abortrels;
+	xl_xact_stats_item *abortstats = NULL;
+	xl_xact_stats_item *commitstats = NULL;
 	SharedInvalidationMessage *invalmsgs;
 
 	/* Initialize linked list */
@@ -1070,9 +1074,16 @@ StartPrepare(GlobalTransaction gxact)
 	hdr.nsubxacts = xactGetCommittedChildren(&children);
 	hdr.ncommitrels = smgrGetPendingDeletes(true, &commitrels);
 	hdr.nabortrels = smgrGetPendingDeletes(false, &abortrels);
+	hdr.ncommitstats =
+		pgstat_get_transactional_drops(true, &commitstats);
+	hdr.nabortstats =
+		pgstat_get_transactional_drops(false, &abortstats);
 	hdr.ninvalmsgs = xactGetCommittedInvalidationMessages(&invalmsgs,
 														  &hdr.initfileinval);
 	hdr.gidlen = strlen(gxact->gid) + 1;	/* Include '\0' */
+	/* EndPrepare will fill the origin data, if necessary */
+	hdr.origin_lsn = InvalidXLogRecPtr;
+	hdr.origin_timestamp = 0;
 
 	save_state_data(&hdr, sizeof(TwoPhaseFileHeader));
 	save_state_data(gxact->gid, hdr.gidlen);
@@ -1089,13 +1100,25 @@ StartPrepare(GlobalTransaction gxact)
 	}
 	if (hdr.ncommitrels > 0)
 	{
-		save_state_data(commitrels, hdr.ncommitrels * sizeof(RelFileNode));
+		save_state_data(commitrels, hdr.ncommitrels * sizeof(RelFileLocator));
 		pfree(commitrels);
 	}
 	if (hdr.nabortrels > 0)
 	{
-		save_state_data(abortrels, hdr.nabortrels * sizeof(RelFileNode));
+		save_state_data(abortrels, hdr.nabortrels * sizeof(RelFileLocator));
 		pfree(abortrels);
+	}
+	if (hdr.ncommitstats > 0)
+	{
+		save_state_data(commitstats,
+						hdr.ncommitstats * sizeof(xl_xact_stats_item));
+		pfree(commitstats);
+	}
+	if (hdr.nabortstats > 0)
+	{
+		save_state_data(abortstats,
+						hdr.nabortstats * sizeof(xl_xact_stats_item));
+		pfree(abortstats);
 	}
 	if (hdr.ninvalmsgs > 0)
 	{
@@ -1132,11 +1155,6 @@ EndPrepare(GlobalTransaction gxact)
 		hdr->origin_lsn = replorigin_session_origin_lsn;
 		hdr->origin_timestamp = replorigin_session_origin_timestamp;
 	}
-	else
-	{
-		hdr->origin_lsn = InvalidXLogRecPtr;
-		hdr->origin_timestamp = 0;
-	}
 
 	/*
 	 * If the data size exceeds MaxAllocSize, we won't be able to read it in
@@ -1152,11 +1170,11 @@ EndPrepare(GlobalTransaction gxact)
 	 * Now writing 2PC state data to WAL. We let the WAL's CRC protection
 	 * cover us, so no need to calculate a separate CRC.
 	 *
-	 * We have to set delayChkpt here, too; otherwise a checkpoint starting
-	 * immediately after the WAL record is inserted could complete without
-	 * fsync'ing our state file.  (This is essentially the same kind of race
-	 * condition as the COMMIT-to-clog-write case that RecordTransactionCommit
-	 * uses delayChkpt for; see notes there.)
+	 * We have to set DELAY_CHKPT_START here, too; otherwise a checkpoint
+	 * starting immediately after the WAL record is inserted could complete
+	 * without fsync'ing our state file.  (This is essentially the same kind
+	 * of race condition as the COMMIT-to-clog-write case that
+	 * RecordTransactionCommit uses DELAY_CHKPT_START for; see notes there.)
 	 *
 	 * We save the PREPARE record's location in the gxact for later use by
 	 * CheckPointTwoPhase.
@@ -1165,7 +1183,8 @@ EndPrepare(GlobalTransaction gxact)
 
 	START_CRIT_SECTION();
 
-	MyProc->delayChkpt = true;
+	Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
+	MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
 	XLogBeginInsert();
 	for (record = records.head; record != NULL; record = record->next)
@@ -1208,7 +1227,7 @@ EndPrepare(GlobalTransaction gxact)
 	 * checkpoint starting after this will certainly see the gxact as a
 	 * candidate for fsyncing.
 	 */
-	MyProc->delayChkpt = false;
+	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 
 	/*
 	 * Remember that we have this GlobalTransaction entry locked for us.  If
@@ -1468,10 +1487,12 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	TwoPhaseFileHeader *hdr;
 	TransactionId latestXid;
 	TransactionId *children;
-	RelFileNode *commitrels;
-	RelFileNode *abortrels;
-	RelFileNode *delrels;
+	RelFileLocator *commitrels;
+	RelFileLocator *abortrels;
+	RelFileLocator *delrels;
 	int			ndelrels;
+	xl_xact_stats_item *commitstats;
+	xl_xact_stats_item *abortstats;
 	SharedInvalidationMessage *invalmsgs;
 
 	/*
@@ -1502,10 +1523,14 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	bufptr += MAXALIGN(hdr->gidlen);
 	children = (TransactionId *) bufptr;
 	bufptr += MAXALIGN(hdr->nsubxacts * sizeof(TransactionId));
-	commitrels = (RelFileNode *) bufptr;
-	bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileNode));
-	abortrels = (RelFileNode *) bufptr;
-	bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileNode));
+	commitrels = (RelFileLocator *) bufptr;
+	bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileLocator));
+	abortrels = (RelFileLocator *) bufptr;
+	bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileLocator));
+	commitstats = (xl_xact_stats_item *) bufptr;
+	bufptr += MAXALIGN(hdr->ncommitstats * sizeof(xl_xact_stats_item));
+	abortstats = (xl_xact_stats_item *) bufptr;
+	bufptr += MAXALIGN(hdr->nabortstats * sizeof(xl_xact_stats_item));
 	invalmsgs = (SharedInvalidationMessage *) bufptr;
 	bufptr += MAXALIGN(hdr->ninvalmsgs * sizeof(SharedInvalidationMessage));
 
@@ -1527,12 +1552,16 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 		RecordTransactionCommitPrepared(xid,
 										hdr->nsubxacts, children,
 										hdr->ncommitrels, commitrels,
+										hdr->ncommitstats,
+										commitstats,
 										hdr->ninvalmsgs, invalmsgs,
 										hdr->initfileinval, gid);
 	else
 		RecordTransactionAbortPrepared(xid,
 									   hdr->nsubxacts, children,
 									   hdr->nabortrels, abortrels,
+									   hdr->nabortstats,
+									   abortstats,
 									   gid);
 
 	ProcArrayRemove(proc, latestXid);
@@ -1567,6 +1596,11 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 
 	/* Make sure files supposed to be dropped are dropped */
 	DropRelationFiles(delrels, ndelrels, false);
+
+	if (isCommit)
+		pgstat_execute_transactional_drops(hdr->ncommitstats, commitstats, false);
+	else
+		pgstat_execute_transactional_drops(hdr->nabortstats, abortstats, false);
 
 	/*
 	 * Handle cache invalidation messages.
@@ -1780,7 +1814,7 @@ CheckPointTwoPhase(XLogRecPtr redo_horizon)
 	 *
 	 * Note that it isn't possible for there to be a GXACT with a
 	 * prepare_end_lsn set prior to the last checkpoint yet is marked invalid,
-	 * because of the efforts with delayChkpt.
+	 * because of the efforts with delayChkptFlags.
 	 */
 	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
 	for (i = 0; i < TwoPhaseState->numPrepXacts; i++)
@@ -2064,8 +2098,10 @@ RecoverPreparedTransactions(void)
 		bufptr += MAXALIGN(hdr->gidlen);
 		subxids = (TransactionId *) bufptr;
 		bufptr += MAXALIGN(hdr->nsubxacts * sizeof(TransactionId));
-		bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileNode));
-		bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileNode));
+		bufptr += MAXALIGN(hdr->ncommitrels * sizeof(RelFileLocator));
+		bufptr += MAXALIGN(hdr->nabortrels * sizeof(RelFileLocator));
+		bufptr += MAXALIGN(hdr->ncommitstats * sizeof(xl_xact_stats_item));
+		bufptr += MAXALIGN(hdr->nabortstats * sizeof(xl_xact_stats_item));
 		bufptr += MAXALIGN(hdr->ninvalmsgs * sizeof(SharedInvalidationMessage));
 
 		/*
@@ -2236,7 +2272,7 @@ ProcessTwoPhaseBuffer(TransactionId xid,
  *	RecordTransactionCommitPrepared
  *
  * This is basically the same as RecordTransactionCommit (q.v. if you change
- * this function): in particular, we must set the delayChkpt flag to avoid a
+ * this function): in particular, we must set DELAY_CHKPT_START to avoid a
  * race condition.
  *
  * We know the transaction made at least one XLOG entry (its PREPARE),
@@ -2247,7 +2283,9 @@ RecordTransactionCommitPrepared(TransactionId xid,
 								int nchildren,
 								TransactionId *children,
 								int nrels,
-								RelFileNode *rels,
+								RelFileLocator *rels,
+								int nstats,
+								xl_xact_stats_item *stats,
 								int ninvalmsgs,
 								SharedInvalidationMessage *invalmsgs,
 								bool initfileinval,
@@ -2267,7 +2305,8 @@ RecordTransactionCommitPrepared(TransactionId xid,
 	START_CRIT_SECTION();
 
 	/* See notes in RecordTransactionCommit */
-	MyProc->delayChkpt = true;
+	Assert((MyProc->delayChkptFlags & DELAY_CHKPT_START) == 0);
+	MyProc->delayChkptFlags |= DELAY_CHKPT_START;
 
 	/*
 	 * Emit the XLOG commit record. Note that we mark 2PC commits as
@@ -2276,6 +2315,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 	 */
 	recptr = XactLogCommitRecord(committs,
 								 nchildren, children, nrels, rels,
+								 nstats, stats,
 								 ninvalmsgs, invalmsgs,
 								 initfileinval,
 								 MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
@@ -2315,7 +2355,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 	TransactionIdCommitTree(xid, nchildren, children);
 
 	/* Checkpoint can proceed now */
-	MyProc->delayChkpt = false;
+	MyProc->delayChkptFlags &= ~DELAY_CHKPT_START;
 
 	END_CRIT_SECTION();
 
@@ -2341,7 +2381,9 @@ RecordTransactionAbortPrepared(TransactionId xid,
 							   int nchildren,
 							   TransactionId *children,
 							   int nrels,
-							   RelFileNode *rels,
+							   RelFileLocator *rels,
+							   int nstats,
+							   xl_xact_stats_item *stats,
 							   const char *gid)
 {
 	XLogRecPtr	recptr;
@@ -2372,6 +2414,7 @@ RecordTransactionAbortPrepared(TransactionId xid,
 	recptr = XactLogAbortRecord(GetCurrentTimestamp(),
 								nchildren, children,
 								nrels, rels,
+								nstats, stats,
 								MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
 								xid, gid);
 

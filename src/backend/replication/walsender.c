@@ -37,7 +37,7 @@
  * record, wait for it to be replicated to the standby, and then exit.
  *
  *
- * Portions Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2010-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/replication/walsender.c
@@ -55,7 +55,9 @@
 #include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogreader.h"
+#include "access/xlogrecovery.h"
 #include "access/xlogutils.h"
+#include "backup/basebackup.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -67,7 +69,6 @@
 #include "nodes/replnodes.h"
 #include "pgstat.h"
 #include "postmaster/interrupt.h"
-#include "replication/basebackup.h"
 #include "replication/decode.h"
 #include "replication/logical.h"
 #include "replication/slot.h"
@@ -241,14 +242,16 @@ static void ProcessStandbyMessage(void);
 static void ProcessStandbyReplyMessage(void);
 static void ProcessStandbyHSFeedbackMessage(void);
 static void ProcessRepliesIfAny(void);
-static void WalSndKeepalive(bool requestReply);
+static void ProcessPendingWrites(void);
+static void WalSndKeepalive(bool requestReply, XLogRecPtr writePtr);
 static void WalSndKeepaliveIfNecessary(void);
 static void WalSndCheckTimeOut(void);
 static long WalSndComputeSleeptime(TimestampTz now);
 static void WalSndWait(uint32 socket_events, long timeout, uint32 wait_event);
 static void WalSndPrepareWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid, bool last_write);
 static void WalSndWriteData(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid, bool last_write);
-static void WalSndUpdateProgress(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid);
+static void WalSndUpdateProgress(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid,
+								 bool skipped_xact);
 static XLogRecPtr WalSndWaitForWal(XLogRecPtr loc);
 static void LagTrackerWrite(XLogRecPtr lsn, TimestampTz local_flush_time);
 static TimeOffset LagTrackerRead(int head, XLogRecPtr lsn, TimestampTz now);
@@ -281,6 +284,21 @@ InitWalSender(void)
 	 */
 	MarkPostmasterChildWalSender();
 	SendPostmasterSignal(PMSIGNAL_ADVANCE_STATE_MACHINE);
+
+	/*
+	 * If the client didn't specify a database to connect to, show in PGPROC
+	 * that our advertised xmin should affect vacuum horizons in all
+	 * databases.  This allows physical replication clients to send hot
+	 * standby feedback that will delay vacuum cleanup in all databases.
+	 */
+	if (MyDatabaseId == InvalidOid)
+	{
+		Assert(MyProc->xmin == InvalidTransactionId);
+		LWLockAcquire(ProcArrayLock, LW_EXCLUSIVE);
+		MyProc->statusFlags |= PROC_AFFECTS_ALL_HORIZONS;
+		ProcGlobal->statusFlags[MyProc->pgxactoff] = MyProc->statusFlags;
+		LWLockRelease(ProcArrayLock);
+	}
 
 	/* Initialize empty timestamp buffer for lag tracking. */
 	lag_tracker = MemoryContextAllocZero(TopMemoryContext, sizeof(LagTracker));
@@ -384,7 +402,7 @@ IdentifySystem(void)
 	TupOutputState *tstate;
 	TupleDesc	tupdesc;
 	Datum		values[4];
-	bool		nulls[4];
+	bool		nulls[4] = {0};
 	TimeLineID	currTLI;
 
 	/*
@@ -419,14 +437,13 @@ IdentifySystem(void)
 	}
 
 	dest = CreateDestReceiver(DestRemoteSimple);
-	MemSet(nulls, false, sizeof(nulls));
 
 	/* need a tuple descriptor representing four columns */
 	tupdesc = CreateTemplateTupleDesc(4);
 	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 1, "systemid",
 							  TEXTOID, -1, 0);
 	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 2, "timeline",
-							  INT4OID, -1, 0);
+							  INT8OID, -1, 0);
 	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 3, "xlogpos",
 							  TEXTOID, -1, 0);
 	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 4, "dbname",
@@ -439,7 +456,7 @@ IdentifySystem(void)
 	values[0] = CStringGetTextDatum(sysid);
 
 	/* column 2: timeline */
-	values[1] = Int32GetDatum(currTLI);
+	values[1] = Int64GetDatum(currTLI);
 
 	/* column 3: wal location */
 	values[2] = CStringGetTextDatum(xloc);
@@ -465,7 +482,7 @@ ReadReplicationSlot(ReadReplicationSlotCmd *cmd)
 	DestReceiver *dest;
 	TupOutputState *tstate;
 	TupleDesc	tupdesc;
-	Datum		values[READ_REPLICATION_SLOT_COLS];
+	Datum		values[READ_REPLICATION_SLOT_COLS] = {0};
 	bool		nulls[READ_REPLICATION_SLOT_COLS];
 
 	tupdesc = CreateTemplateTupleDesc(READ_REPLICATION_SLOT_COLS);
@@ -477,8 +494,7 @@ ReadReplicationSlot(ReadReplicationSlotCmd *cmd)
 	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 3, "restart_tli",
 							  INT8OID, -1, 0);
 
-	MemSet(values, 0, READ_REPLICATION_SLOT_COLS * sizeof(Datum));
-	MemSet(nulls, true, READ_REPLICATION_SLOT_COLS * sizeof(bool));
+	memset(nulls, true, READ_REPLICATION_SLOT_COLS * sizeof(bool));
 
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	slot = SearchNamedReplicationSlot(cmd->slotname, false);
@@ -561,6 +577,8 @@ ReadReplicationSlot(ReadReplicationSlotCmd *cmd)
 static void
 SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 {
+	DestReceiver *dest;
+	TupleDesc	tupdesc;
 	StringInfoData buf;
 	char		histfname[MAXFNAMELEN];
 	char		path[MAXPGPATH];
@@ -569,36 +587,21 @@ SendTimeLineHistory(TimeLineHistoryCmd *cmd)
 	off_t		bytesleft;
 	Size		len;
 
+	dest = CreateDestReceiver(DestRemoteSimple);
+
 	/*
 	 * Reply with a result set with one row, and two columns. The first col is
 	 * the name of the history file, 2nd is the contents.
 	 */
+	tupdesc = CreateTemplateTupleDesc(2);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 1, "filename", TEXTOID, -1, 0);
+	TupleDescInitBuiltinEntry(tupdesc, (AttrNumber) 2, "content", TEXTOID, -1, 0);
 
 	TLHistoryFileName(histfname, cmd->timeline);
 	TLHistoryFilePath(path, cmd->timeline);
 
 	/* Send a RowDescription message */
-	pq_beginmessage(&buf, 'T');
-	pq_sendint16(&buf, 2);		/* 2 fields */
-
-	/* first field */
-	pq_sendstring(&buf, "filename");	/* col name */
-	pq_sendint32(&buf, 0);		/* table oid */
-	pq_sendint16(&buf, 0);		/* attnum */
-	pq_sendint32(&buf, TEXTOID);	/* type oid */
-	pq_sendint16(&buf, -1);		/* typlen */
-	pq_sendint32(&buf, 0);		/* typmod */
-	pq_sendint16(&buf, 0);		/* format code */
-
-	/* second field */
-	pq_sendstring(&buf, "content"); /* col name */
-	pq_sendint32(&buf, 0);		/* table oid */
-	pq_sendint16(&buf, 0);		/* attnum */
-	pq_sendint32(&buf, TEXTOID);	/* type oid */
-	pq_sendint16(&buf, -1);		/* typlen */
-	pq_sendint32(&buf, 0);		/* typmod */
-	pq_sendint16(&buf, 0);		/* format code */
-	pq_endmessage(&buf);
+	dest->rStartup(dest, CMD_SELECT, tupdesc);
 
 	/* Send a DataRow message */
 	pq_beginmessage(&buf, 'D');
@@ -854,13 +857,12 @@ StartReplication(StartReplicationCmd *cmd)
 		TupOutputState *tstate;
 		TupleDesc	tupdesc;
 		Datum		values[2];
-		bool		nulls[2];
+		bool		nulls[2] = {0};
 
 		snprintf(startpos_str, sizeof(startpos_str), "%X/%X",
 				 LSN_FORMAT_ARGS(sendTimeLineValidUpto));
 
 		dest = CreateDestReceiver(DestRemoteSimple);
-		MemSet(nulls, false, sizeof(nulls));
 
 		/*
 		 * Need a tuple descriptor representing two columns. int8 may seem
@@ -997,7 +999,6 @@ parseCreateReplSlotOptions(CreateReplicationSlotCmd *cmd,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("unrecognized value for CREATE_REPLICATION_SLOT option \"%s\": \"%s\"",
 								defel->defname, action)));
-
 		}
 		else if (strcmp(defel->defname, "reserve_wal") == 0)
 		{
@@ -1039,7 +1040,7 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 	TupOutputState *tstate;
 	TupleDesc	tupdesc;
 	Datum		values[4];
-	bool		nulls[4];
+	bool		nulls[4] = {0};
 
 	Assert(!MyReplicationSlot);
 
@@ -1174,7 +1175,6 @@ CreateReplicationSlot(CreateReplicationSlotCmd *cmd)
 			 LSN_FORMAT_ARGS(MyReplicationSlot->data.confirmed_flush));
 
 	dest = CreateDestReceiver(DestRemoteSimple);
-	MemSet(nulls, false, sizeof(nulls));
 
 	/*----------
 	 * Need a tuple descriptor representing four columns:
@@ -1398,6 +1398,16 @@ WalSndWriteData(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid,
 	}
 
 	/* If we have pending write here, go to slow path */
+	ProcessPendingWrites();
+}
+
+/*
+ * Wait until there is no pending write. Also process replies from the other
+ * side and check timeouts during that.
+ */
+static void
+ProcessPendingWrites(void)
+{
 	for (;;)
 	{
 		long		sleeptime;
@@ -1446,24 +1456,68 @@ WalSndWriteData(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid,
  * LogicalDecodingContext 'update_progress' callback.
  *
  * Write the current position to the lag tracker (see XLogSendPhysical).
+ *
+ * When skipping empty transactions, send a keepalive message if necessary.
  */
 static void
-WalSndUpdateProgress(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid)
+WalSndUpdateProgress(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xid,
+					 bool skipped_xact)
 {
 	static TimestampTz sendTime = 0;
 	TimestampTz now = GetCurrentTimestamp();
+	bool		pending_writes = false;
+	bool		end_xact = ctx->end_xact;
 
 	/*
 	 * Track lag no more than once per WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS to
 	 * avoid flooding the lag tracker when we commit frequently.
+	 *
+	 * We don't have a mechanism to get the ack for any LSN other than end
+	 * xact LSN from the downstream. So, we track lag only for end of
+	 * transaction LSN.
 	 */
 #define WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS	1000
-	if (!TimestampDifferenceExceeds(sendTime, now,
-									WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS))
-		return;
+	if (end_xact && TimestampDifferenceExceeds(sendTime, now,
+											   WALSND_LOGICAL_LAG_TRACK_INTERVAL_MS))
+	{
+		LagTrackerWrite(lsn, now);
+		sendTime = now;
+	}
 
-	LagTrackerWrite(lsn, now);
-	sendTime = now;
+	/*
+	 * When skipping empty transactions in synchronous replication, we send a
+	 * keepalive message to avoid delaying such transactions.
+	 *
+	 * It is okay to check sync_standbys_defined flag without lock here as in
+	 * the worst case we will just send an extra keepalive message when it is
+	 * really not required.
+	 */
+	if (skipped_xact &&
+		SyncRepRequested() &&
+		((volatile WalSndCtlData *) WalSndCtl)->sync_standbys_defined)
+	{
+		WalSndKeepalive(false, lsn);
+
+		/* Try to flush pending output to the client */
+		if (pq_flush_if_writable() != 0)
+			WalSndShutdown();
+
+		/* If we have pending write here, make sure it's actually flushed */
+		if (pq_is_send_pending())
+			pending_writes = true;
+	}
+
+	/*
+	 * Process pending writes if any or try to send a keepalive if required.
+	 * We don't need to try sending keep alive messages at the transaction end
+	 * as that will be done at a later point in time. This is required only
+	 * for large transactions where we don't send any changes to the
+	 * downstream and the receiver can timeout due to that.
+	 */
+	if (pending_writes || (!end_xact &&
+						   now >= TimestampTzPlusMilliseconds(last_reply_timestamp,
+															  wal_sender_timeout / 2)))
+		ProcessPendingWrites();
 }
 
 /*
@@ -1549,7 +1603,7 @@ WalSndWaitForWal(XLogRecPtr loc)
 		if (MyWalSnd->flush < sentPtr &&
 			MyWalSnd->write < sentPtr &&
 			!waiting_for_ping_response)
-			WalSndKeepalive(false);
+			WalSndKeepalive(false, InvalidXLogRecPtr);
 
 		/* check whether we're done */
 		if (loc <= RecentFlushPtr)
@@ -1630,7 +1684,8 @@ exec_replication_command(const char *cmd_string)
 	 */
 	if (MyWalSnd->state == WALSNDSTATE_STOPPING)
 		ereport(ERROR,
-				(errmsg("cannot execute new commands while WAL sender is in stopping mode")));
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("cannot execute new commands while WAL sender is in stopping mode")));
 
 	/*
 	 * CREATE_REPLICATION_SLOT ... LOGICAL exports a snapshot until the next
@@ -1641,7 +1696,7 @@ exec_replication_command(const char *cmd_string)
 	CHECK_FOR_INTERRUPTS();
 
 	/*
-	 * Parse the command.
+	 * Prepare to parse and execute the command.
 	 */
 	cmd_context = AllocSetContextCreate(CurrentMemoryContext,
 										"Replication command context",
@@ -1649,6 +1704,31 @@ exec_replication_command(const char *cmd_string)
 	old_context = MemoryContextSwitchTo(cmd_context);
 
 	replication_scanner_init(cmd_string);
+
+	/*
+	 * Is it a WalSender command?
+	 */
+	if (!replication_scanner_is_replication_command())
+	{
+		/* Nope; clean up and get out. */
+		replication_scanner_finish();
+
+		MemoryContextSwitchTo(old_context);
+		MemoryContextDelete(cmd_context);
+
+		/* XXX this is a pretty random place to make this check */
+		if (MyDatabaseId == InvalidOid)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot execute SQL commands in WAL sender for physical replication")));
+
+		/* Tell the caller that this wasn't a WalSender command. */
+		return false;
+	}
+
+	/*
+	 * Looks like a WalSender command, so parse it.
+	 */
 	parse_rc = replication_yyparse();
 	if (parse_rc != 0)
 		ereport(ERROR,
@@ -1658,23 +1738,6 @@ exec_replication_command(const char *cmd_string)
 	replication_scanner_finish();
 
 	cmd_node = replication_parse_result;
-
-	/*
-	 * If it's a SQL command, just clean up our mess and return false; the
-	 * caller will take care of executing it.
-	 */
-	if (IsA(cmd_node, SQLCmd))
-	{
-		if (MyDatabaseId == InvalidOid)
-			ereport(ERROR,
-					(errmsg("cannot execute SQL commands in WAL sender for physical replication")));
-
-		MemoryContextSwitchTo(old_context);
-		MemoryContextDelete(cmd_context);
-
-		/* Tell the caller that this wasn't a WalSender command. */
-		return false;
-	}
 
 	/*
 	 * Report query to various monitoring facilities.  For this purpose, we
@@ -2058,7 +2121,7 @@ ProcessStandbyReplyMessage(void)
 
 	/* Send a reply if the standby requested one. */
 	if (replyRequested)
-		WalSndKeepalive(false);
+		WalSndKeepalive(false, InvalidXLogRecPtr);
 
 	/*
 	 * Update shared state for this WalSender process based on reply data from
@@ -3064,7 +3127,7 @@ WalSndDone(WalSndSendDataCallback send_data)
 		proc_exit(0);
 	}
 	if (!waiting_for_ping_response)
-		WalSndKeepalive(true);
+		WalSndKeepalive(true, InvalidXLogRecPtr);
 }
 
 /*
@@ -3393,37 +3456,11 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 {
 #define PG_STAT_GET_WAL_SENDERS_COLS	12
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc	tupdesc;
-	Tuplestorestate *tupstore;
-	MemoryContext per_query_ctx;
-	MemoryContext oldcontext;
 	SyncRepStandbyData *sync_standbys;
 	int			num_standbys;
 	int			i;
 
-	/* check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
-
-	/* Build a tuple descriptor for our result type */
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		elog(ERROR, "return type must be a row type");
-
-	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	tupstore = tuplestore_begin_heap(true, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = tupstore;
-	rsinfo->setDesc = tupdesc;
-
-	MemoryContextSwitchTo(oldcontext);
+	SetSingleFuncCall(fcinfo, 0);
 
 	/*
 	 * Get the currently active synchronous standbys.  This could be out of
@@ -3447,7 +3484,7 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 		TimestampTz replyTime;
 		bool		is_sync_standby;
 		Datum		values[PG_STAT_GET_WAL_SENDERS_COLS];
-		bool		nulls[PG_STAT_GET_WAL_SENDERS_COLS];
+		bool		nulls[PG_STAT_GET_WAL_SENDERS_COLS] = {0};
 		int			j;
 
 		/* Collect data from shared memory */
@@ -3486,15 +3523,14 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 			}
 		}
 
-		memset(nulls, 0, sizeof(nulls));
 		values[0] = Int32GetDatum(pid);
 
-		if (!is_member_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
+		if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
 		{
 			/*
-			 * Only superusers and members of pg_read_all_stats can see
-			 * details. Other users only get the pid value to know it's a
-			 * walsender, but no details.
+			 * Only superusers and roles with privileges of pg_read_all_stats
+			 * can see details. Other users only get the pid value to know
+			 * it's a walsender, but no details.
 			 */
 			MemSet(&nulls[1], true, PG_STAT_GET_WAL_SENDERS_COLS - 1);
 		}
@@ -3567,11 +3603,9 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
 				values[11] = TimestampTzGetDatum(replyTime);
 		}
 
-		tuplestore_putvalues(tupstore, tupdesc, values, nulls);
+		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
+							 values, nulls);
 	}
-
-	/* clean up and return the tuplestore */
-	tuplestore_donestoring(tupstore);
 
 	return (Datum) 0;
 }
@@ -3581,18 +3615,22 @@ pg_stat_get_wal_senders(PG_FUNCTION_ARGS)
  *
  * If requestReply is set, the message requests the other party to send
  * a message back to us, for heartbeat purposes.  We also set a flag to
- * let nearby code that we're waiting for that response, to avoid
+ * let nearby code know that we're waiting for that response, to avoid
  * repeated requests.
+ *
+ * writePtr is the location up to which the WAL is sent. It is essentially
+ * the same as sentPtr but in some cases, we need to send keep alive before
+ * sentPtr is updated like when skipping empty transactions.
  */
 static void
-WalSndKeepalive(bool requestReply)
+WalSndKeepalive(bool requestReply, XLogRecPtr writePtr)
 {
 	elog(DEBUG2, "sending replication keepalive");
 
 	/* construct the message... */
 	resetStringInfo(&output_message);
 	pq_sendbyte(&output_message, 'k');
-	pq_sendint64(&output_message, sentPtr);
+	pq_sendint64(&output_message, XLogRecPtrIsInvalid(writePtr) ? sentPtr : writePtr);
 	pq_sendint64(&output_message, GetCurrentTimestamp());
 	pq_sendbyte(&output_message, requestReply ? 1 : 0);
 
@@ -3631,7 +3669,7 @@ WalSndKeepaliveIfNecessary(void)
 											wal_sender_timeout / 2);
 	if (last_processing >= ping_time)
 	{
-		WalSndKeepalive(true);
+		WalSndKeepalive(true, InvalidXLogRecPtr);
 
 		/* Try to flush pending output to the client */
 		if (pq_flush_if_writable() != 0)

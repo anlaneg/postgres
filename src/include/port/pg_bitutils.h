@@ -4,7 +4,7 @@
  *	  Miscellaneous functions for bit-wise operations.
  *
  *
- * Copyright (c) 2019-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2019-2022, PostgreSQL Global Development Group
  *
  * src/include/port/pg_bitutils.h
  *
@@ -176,16 +176,6 @@ pg_nextpower2_64(uint64 num)
 }
 
 /*
- * pg_nextpower2_size_t
- *		Returns the next higher power of 2 above 'num', for a size_t input.
- */
-#if SIZEOF_SIZE_T == 4
-#define pg_nextpower2_size_t(num) pg_nextpower2_32(num)
-#else
-#define pg_nextpower2_size_t(num) pg_nextpower2_64(num)
-#endif
-
-/*
  * pg_prevpower2_32
  *		Returns the next lower power of 2 below 'num', or 'num' if it's
  *		already a power of 2.
@@ -210,16 +200,6 @@ pg_prevpower2_64(uint64 num)
 {
 	return ((uint64) 1) << pg_leftmost_one_pos64(num);
 }
-
-/*
- * pg_prevpower2_size_t
- *		Returns the next lower power of 2 below 'num', for a size_t input.
- */
-#if SIZEOF_SIZE_T == 4
-#define pg_prevpower2_size_t(num) pg_prevpower2_32(num)
-#else
-#define pg_prevpower2_size_t(num) pg_prevpower2_64(num)
-#endif
 
 /*
  * pg_ceil_log2_32
@@ -285,12 +265,30 @@ extern int	pg_popcount64(uint64 word);
 extern uint64 pg_popcount(const char *buf, int bytes);
 
 /*
- * Rotate the bits of "word" to the right by n bits.
+ * Rotate the bits of "word" to the right/left by n bits.
  */
 static inline uint32
 pg_rotate_right32(uint32 word, int n)
 {
-	return (word >> n) | (word << (sizeof(word) * BITS_PER_BYTE - n));
+	return (word >> n) | (word << (32 - n));
 }
+
+static inline uint32
+pg_rotate_left32(uint32 word, int n)
+{
+	return (word << n) | (word >> (32 - n));
+}
+
+/* size_t variants of the above, as required */
+
+#if SIZEOF_SIZE_T == 4
+#define pg_leftmost_one_pos_size_t pg_leftmost_one_pos32
+#define pg_nextpower2_size_t pg_nextpower2_32
+#define pg_prevpower2_size_t pg_prevpower2_32
+#else
+#define pg_leftmost_one_pos_size_t pg_leftmost_one_pos64
+#define pg_nextpower2_size_t pg_nextpower2_64
+#define pg_prevpower2_size_t pg_prevpower2_64
+#endif
 
 #endif							/* PG_BITUTILS_H */

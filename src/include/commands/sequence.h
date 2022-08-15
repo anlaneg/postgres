@@ -3,7 +3,7 @@
  * sequence.h
  *	  prototypes for sequence.c.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/sequence.h
@@ -19,7 +19,7 @@
 #include "lib/stringinfo.h"
 #include "nodes/parsenodes.h"
 #include "parser/parse_node.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 
 
 typedef struct FormData_pg_sequence_data
@@ -47,7 +47,7 @@ typedef FormData_pg_sequence_data *Form_pg_sequence_data;
 
 typedef struct xl_seq_rec
 {
-	RelFileNode node;
+	RelFileLocator locator;
 	/* SEQUENCE TUPLE DATA FOLLOWS AT THE END */
 } xl_seq_rec;
 
@@ -57,6 +57,7 @@ extern List *sequence_options(Oid relid);
 
 extern ObjectAddress DefineSequence(ParseState *pstate, CreateSeqStmt *stmt);
 extern ObjectAddress AlterSequence(ParseState *pstate, AlterSeqStmt *stmt);
+extern void SequenceChangePersistence(Oid relid, char newrelpersistence);
 extern void DeleteSequenceTuple(Oid relid);
 extern void ResetSequence(Oid seq_relid);
 extern void ResetSequenceCaches(void);

@@ -3,7 +3,7 @@
  * pg_proc.c
  *	  routines to support manipulation of the pg_proc relation
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -35,6 +35,7 @@
 #include "parser/analyze.h"
 #include "parser/parse_coerce.h"
 #include "parser/parse_type.h"
+#include "pgstat.h"
 #include "rewrite/rewriteHandler.h"
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
@@ -709,6 +710,10 @@ ProcedureCreate(const char *procedureName,
 			AtEOXact_GUC(true, save_nestlevel);
 	}
 
+	/* ensure that stats are dropped if transaction aborts */
+	if (!is_update)
+		pgstat_create_function(retval);
+
 	return myself;
 }
 
@@ -947,7 +952,7 @@ fmgr_sql_validator(PG_FUNCTION_ARGS)
 					RawStmt    *parsetree = lfirst_node(RawStmt, lc);
 					List	   *querytree_sublist;
 
-					querytree_sublist = pg_analyze_and_rewrite_params(parsetree,
+					querytree_sublist = pg_analyze_and_rewrite_withcb(parsetree,
 																	  prosrc,
 																	  (ParserSetupHook) sql_fn_parser_setup,
 																	  pinfo,
@@ -1188,10 +1193,7 @@ oid_array_to_list(Datum datum)
 	int			i;
 	List	   *result = NIL;
 
-	deconstruct_array(array,
-					  OIDOID,
-					  sizeof(Oid), true, TYPALIGN_INT,
-					  &values, NULL, &nelems);
+	deconstruct_array_builtin(array, OIDOID, &values, NULL, &nelems);
 	for (i = 0; i < nelems; i++)
 		result = lappend_oid(result, values[i]);
 	return result;

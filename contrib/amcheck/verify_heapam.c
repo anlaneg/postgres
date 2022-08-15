@@ -3,7 +3,7 @@
  * verify_heapam.c
  *	  Functions to check postgresql heap relations for corruption
  *
- * Copyright (c) 2016-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2022, PostgreSQL Global Development Group
  *
  *	  contrib/amcheck/verify_heapam.c
  *-------------------------------------------------------------------------
@@ -165,7 +165,6 @@ static bool check_tuple_visibility(HeapCheckContext *ctx);
 static void report_corruption(HeapCheckContext *ctx, char *msg);
 static void report_toast_corruption(HeapCheckContext *ctx,
 									ToastedAttribute *ta, char *msg);
-static TupleDesc verify_heapam_tupdesc(void);
 static FullTransactionId FullTransactionIdFromXidAndCtx(TransactionId xid,
 														const HeapCheckContext *ctx);
 static void update_cached_xid_range(HeapCheckContext *ctx);
@@ -214,8 +213,6 @@ Datum
 verify_heapam(PG_FUNCTION_ARGS)
 {
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	MemoryContext old_context;
-	bool		random_access;
 	HeapCheckContext ctx;
 	Buffer		vmbuffer = InvalidBuffer;
 	Oid			relid;
@@ -226,16 +223,6 @@ verify_heapam(PG_FUNCTION_ARGS)
 	BlockNumber last_block;
 	BlockNumber nblocks;
 	const char *skip;
-
-	/* Check to see if caller supports us returning a tuplestore */
-	if (rsinfo == NULL || !IsA(rsinfo, ReturnSetInfo))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("set-valued function called in context that cannot accept a set")));
-	if (!(rsinfo->allowedModes & SFRM_Materialize))
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("materialize mode required, but it is not allowed in this context")));
 
 	/* Check supplied arguments */
 	if (PG_ARGISNULL(0))
@@ -290,15 +277,10 @@ verify_heapam(PG_FUNCTION_ARGS)
 	 */
 	ctx.attnum = -1;
 
-	/* The tupdesc and tuplestore must be created in ecxt_per_query_memory */
-	old_context = MemoryContextSwitchTo(rsinfo->econtext->ecxt_per_query_memory);
-	random_access = (rsinfo->allowedModes & SFRM_Materialize_Random) != 0;
-	ctx.tupdesc = verify_heapam_tupdesc();
-	ctx.tupstore = tuplestore_begin_heap(random_access, false, work_mem);
-	rsinfo->returnMode = SFRM_Materialize;
-	rsinfo->setResult = ctx.tupstore;
-	rsinfo->setDesc = ctx.tupdesc;
-	MemoryContextSwitchTo(old_context);
+	/* Construct the tuplestore and tuple descriptor */
+	SetSingleFuncCall(fcinfo, 0);
+	ctx.tupdesc = rsinfo->setDesc;
+	ctx.tupstore = rsinfo->setResult;
 
 	/* Open relation, check relkind and access method */
 	ctx.rel = relation_open(relid, AccessShareLock);
@@ -572,12 +554,10 @@ report_corruption_internal(Tuplestorestate *tupstore, TupleDesc tupdesc,
 						   BlockNumber blkno, OffsetNumber offnum,
 						   AttrNumber attnum, char *msg)
 {
-	Datum		values[HEAPCHECK_RELATION_COLS];
-	bool		nulls[HEAPCHECK_RELATION_COLS];
+	Datum		values[HEAPCHECK_RELATION_COLS] = {0};
+	bool		nulls[HEAPCHECK_RELATION_COLS] = {0};
 	HeapTuple	tuple;
 
-	MemSet(values, 0, sizeof(values));
-	MemSet(nulls, 0, sizeof(nulls));
 	values[0] = Int64GetDatum(blkno);
 	values[1] = Int32GetDatum(offnum);
 	values[2] = Int32GetDatum(attnum);
@@ -628,26 +608,6 @@ report_toast_corruption(HeapCheckContext *ctx, ToastedAttribute *ta,
 	report_corruption_internal(ctx->tupstore, ctx->tupdesc, ta->blkno,
 							   ta->offnum, ta->attnum, msg);
 	ctx->is_corrupt = true;
-}
-
-/*
- * Construct the TupleDesc used to report messages about corruptions found
- * while scanning the heap.
- */
-static TupleDesc
-verify_heapam_tupdesc(void)
-{
-	TupleDesc	tupdesc;
-	AttrNumber	a = 0;
-
-	tupdesc = CreateTemplateTupleDesc(HEAPCHECK_RELATION_COLS);
-	TupleDescInitEntry(tupdesc, ++a, "blkno", INT8OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "offnum", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "attnum", INT4OID, -1, 0);
-	TupleDescInitEntry(tupdesc, ++a, "msg", TEXTOID, -1, 0);
-	Assert(a == HEAPCHECK_RELATION_COLS);
-
-	return BlessTupleDesc(tupdesc);
 }
 
 /*
@@ -1423,34 +1383,26 @@ check_tuple_attribute(HeapCheckContext *ctx)
 								   toast_pointer.va_rawsize,
 								   VARLENA_SIZE_LIMIT));
 
-	if (VARATT_IS_COMPRESSED(&toast_pointer))
+	if (VARATT_EXTERNAL_IS_COMPRESSED(toast_pointer))
 	{
 		ToastCompressionId cmid;
 		bool		valid = false;
-
-		/* Compression should never expand the attribute */
-		if (VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer) > toast_pointer.va_rawsize - VARHDRSZ)
-			report_corruption(ctx,
-							  psprintf("toast value %u external size %u exceeds maximum expected for rawsize %d",
-									   toast_pointer.va_valueid,
-									   VARATT_EXTERNAL_GET_EXTSIZE(toast_pointer),
-									   toast_pointer.va_rawsize));
 
 		/* Compressed attributes should have a valid compression method */
 		cmid = TOAST_COMPRESS_METHOD(&toast_pointer);
 		switch (cmid)
 		{
-			/* List of all valid compression method IDs */
+				/* List of all valid compression method IDs */
 			case TOAST_PGLZ_COMPRESSION_ID:
 			case TOAST_LZ4_COMPRESSION_ID:
 				valid = true;
 				break;
 
-			/* Recognized but invalid compression method ID */
+				/* Recognized but invalid compression method ID */
 			case TOAST_INVALID_COMPRESSION_ID:
 				break;
 
-			/* Intentionally no default here */
+				/* Intentionally no default here */
 		}
 		if (!valid)
 			report_corruption(ctx,

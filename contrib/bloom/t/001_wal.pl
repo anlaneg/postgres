@@ -1,12 +1,19 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Test generic xlog record work for bloom index replication.
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 31;
+use Test::More;
+
+if (PostgreSQL::Test::Utils::has_wal_read_bug)
+{
+	# We'd prefer to use Test::More->builder->todo_start, but the bug causes
+	# this test file to die(), not merely to fail.
+	plan skip_all => 'filesystem bug';
+}
 
 my $node_primary;
 my $node_standby;
@@ -80,3 +87,5 @@ for my $i (1 .. 10)
 	);
 	test_index_replay("insert $i");
 }
+
+done_testing();

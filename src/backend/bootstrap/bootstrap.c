@@ -4,7 +4,7 @@
  *	  routines to support running postgres in 'bootstrap' mode
  *	bootstrap mode is used to create the initial template database
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -262,7 +262,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 								(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								 errmsg("-X requires a power of two value between 1 MB and 1 GB")));
 					SetConfigOption("wal_segment_size", optarg, PGC_INTERNAL,
-									PGC_S_OVERRIDE);
+									PGC_S_DYNAMIC_DEFAULT);
 				}
 				break;
 			case 'c':
@@ -288,8 +288,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 
 					SetConfigOption(name, value, PGC_POSTMASTER, PGC_S_ARGV);
 					free(name);
-					if (value)
-						free(value);
+					free(value);
 					break;
 				}
 			default:
@@ -355,7 +354,7 @@ BootstrapModeMain(int argc, char *argv[], bool check_only)
 	if (pg_link_canary_is_frontend())
 		elog(ERROR, "backend is incorrectly linked to frontend functions");
 
-	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL, false);
+	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, false, false, NULL);
 
 	/* Initialize stuff for bootstrap-file processing */
 	for (i = 0; i < MAXATTR; i++)

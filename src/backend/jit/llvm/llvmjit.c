@@ -3,7 +3,7 @@
  * llvmjit.c
  *	  Core part of the LLVM JIT provider.
  *
- * Copyright (c) 2016-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2016-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  src/backend/jit/llvm/llvmjit.c
@@ -890,8 +890,8 @@ llvm_shutdown(int code, Datum arg)
 	 * has occurred in the middle of LLVM code. It is not safe to call back
 	 * into LLVM (which is why a FATAL error was thrown).
 	 *
-	 * We do need to shutdown LLVM in other shutdown cases, otherwise
-	 * e.g. profiling data won't be written out.
+	 * We do need to shutdown LLVM in other shutdown cases, otherwise e.g.
+	 * profiling data won't be written out.
 	 */
 	if (llvm_in_fatal_on_oom())
 	{

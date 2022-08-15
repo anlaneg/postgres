@@ -4,7 +4,7 @@
  *		Functions for finding and validating executable files
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -24,6 +24,19 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifdef EXEC_BACKEND
+#if defined(HAVE_SYS_PERSONALITY_H)
+#include <sys/personality.h>
+#elif defined(HAVE_SYS_PROCCTL_H)
+#include <sys/procctl.h>
+#endif
+#endif
+
+/* Inhibit mingw CRT's auto-globbing of command line arguments */
+#if defined(WIN32) && !defined(_MSC_VER)
+extern int	_CRT_glob = 0;		/* 0 turns off globbing; 1 turns it on */
+#endif
 
 /*
  * Hacky solution to allow expressing both frontend and backend error reports
@@ -61,6 +74,7 @@ static BOOL GetTokenUser(HANDLE hToken, PTOKEN_USER *ppTokenUser);
  * returns 0 if the file is found and no error is encountered.
  *		  -1 if the regular file "path" does not exist or cannot be executed.
  *		  -2 if the file is otherwise valid but cannot be read.
+ * in the failure cases, errno is set appropriately
  */
 int
 validate_exec(const char *path)
@@ -92,7 +106,16 @@ validate_exec(const char *path)
 		return -1;
 
 	if (!S_ISREG(buf.st_mode))
+	{
+		/*
+		 * POSIX offers no errno code that's simply "not a regular file".  If
+		 * it's a directory we can use EISDIR.  Otherwise, it's most likely a
+		 * device special file, and EPERM (Operation not permitted) isn't too
+		 * horribly off base.
+		 */
+		errno = S_ISDIR(buf.st_mode) ? EISDIR : EPERM;
 		return -1;
+	}
 
 	/*
 	 * Ensure that the file is both executable and readable (required for
@@ -101,9 +124,11 @@ validate_exec(const char *path)
 #ifndef WIN32
 	is_r = (access(path, R_OK) == 0);
 	is_x = (access(path, X_OK) == 0);
+	/* access() will set errno if it returns -1 */
 #else
 	is_r = buf.st_mode & S_IRUSR;
 	is_x = buf.st_mode & S_IXUSR;
+	errno = EACCES;				/* appropriate thing if we return nonzero */
 #endif
 	return is_x ? (is_r ? 0 : -2) : -1;
 }
@@ -152,7 +177,7 @@ find_my_exec(const char *argv0, char *retpath)
 			return resolve_symlinks(retpath);
 
 		log_error(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-				  _("invalid binary \"%s\""), retpath);
+				  _("invalid binary \"%s\": %m"), retpath);
 		return -1;
 	}
 
@@ -202,7 +227,7 @@ find_my_exec(const char *argv0, char *retpath)
 					break;
 				case -2:		/* found but disqualified */
 					log_error(errcode(ERRCODE_WRONG_OBJECT_TYPE),
-							  _("could not read binary \"%s\""),
+							  _("could not read binary \"%s\": %m"),
 							  retpath);
 					break;
 			}
@@ -225,6 +250,10 @@ find_my_exec(const char *argv0, char *retpath)
  * Note: we are not particularly tense about producing nice error messages
  * because we are not really expecting error here; we just determined that
  * the symlink does point to a valid executable.
+ *
+ * Here we test HAVE_READLINK, which excludes Windows.  There's no point in
+ * using our junction point-based replacement code for this, because that only
+ * works for directories.
  */
 static int
 resolve_symlinks(char *path)
@@ -469,6 +498,31 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 		setenv("PGSYSCONFDIR", path, 0);
 	}
 }
+
+#ifdef EXEC_BACKEND
+/*
+ * For the benefit of PostgreSQL developers testing EXEC_BACKEND on Unix
+ * systems (code paths normally exercised only on Windows), provide a way to
+ * disable address space layout randomization, if we know how on this platform.
+ * Otherwise, backends may fail to attach to shared memory at the fixed address
+ * chosen by the postmaster.  (See also the macOS-specific hack in
+ * sysv_shmem.c.)
+ */
+int
+pg_disable_aslr(void)
+{
+#if defined(HAVE_SYS_PERSONALITY_H)
+	return personality(ADDR_NO_RANDOMIZE);
+#elif defined(HAVE_SYS_PROCCTL_H) && defined(PROC_ASLR_FORCE_DISABLE)
+	int			data = PROC_ASLR_FORCE_DISABLE;
+
+	return procctl(P_PID, 0, PROC_ASLR_CTL, &data);
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+#endif
 
 #ifdef WIN32
 

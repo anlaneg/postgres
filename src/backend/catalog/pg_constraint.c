@@ -3,7 +3,7 @@
  * pg_constraint.c
  *	  routines to support manipulation of the pg_constraint relation
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -112,8 +112,7 @@ CreateConstraintEntry(const char *constraintName,
 		conkey = (Datum *) palloc(constraintNKeys * sizeof(Datum));
 		for (i = 0; i < constraintNKeys; i++)
 			conkey[i] = Int16GetDatum(constraintKey[i]);
-		conkeyArray = construct_array(conkey, constraintNKeys,
-									  INT2OID, 2, true, TYPALIGN_SHORT);
+		conkeyArray = construct_array_builtin(conkey, constraintNKeys, INT2OID);
 	}
 	else
 		conkeyArray = NULL;
@@ -125,27 +124,22 @@ CreateConstraintEntry(const char *constraintName,
 		fkdatums = (Datum *) palloc(foreignNKeys * sizeof(Datum));
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = Int16GetDatum(foreignKey[i]);
-		confkeyArray = construct_array(fkdatums, foreignNKeys,
-									   INT2OID, 2, true, TYPALIGN_SHORT);
+		confkeyArray = construct_array_builtin(fkdatums, foreignNKeys, INT2OID);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(pfEqOp[i]);
-		conpfeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
+		conpfeqopArray = construct_array_builtin(fkdatums, foreignNKeys, OIDOID);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(ppEqOp[i]);
-		conppeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
+		conppeqopArray = construct_array_builtin(fkdatums, foreignNKeys, OIDOID);
 		for (i = 0; i < foreignNKeys; i++)
 			fkdatums[i] = ObjectIdGetDatum(ffEqOp[i]);
-		conffeqopArray = construct_array(fkdatums, foreignNKeys,
-										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
+		conffeqopArray = construct_array_builtin(fkdatums, foreignNKeys, OIDOID);
 
 		if (numFkDeleteSetCols > 0)
 		{
 			for (i = 0; i < numFkDeleteSetCols; i++)
 				fkdatums[i] = Int16GetDatum(fkDeleteSetCols[i]);
-			confdelsetcolsArray = construct_array(fkdatums, numFkDeleteSetCols,
-										   INT2OID, 2, true, TYPALIGN_SHORT);
+			confdelsetcolsArray = construct_array_builtin(fkdatums, numFkDeleteSetCols, INT2OID);
 		}
 		else
 			confdelsetcolsArray = NULL;
@@ -166,8 +160,7 @@ CreateConstraintEntry(const char *constraintName,
 		opdatums = (Datum *) palloc(constraintNKeys * sizeof(Datum));
 		for (i = 0; i < constraintNKeys; i++)
 			opdatums[i] = ObjectIdGetDatum(exclOp[i]);
-		conexclopArray = construct_array(opdatums, constraintNKeys,
-										 OIDOID, sizeof(Oid), true, TYPALIGN_INT);
+		conexclopArray = construct_array_builtin(opdatums, constraintNKeys, OIDOID);
 	}
 	else
 		conexclopArray = NULL;
@@ -1291,7 +1284,7 @@ DeconstructFkConstraintRow(HeapTuple tuple, int *numfks,
 		}
 		else
 		{
-			int num_delete_cols;
+			int			num_delete_cols;
 
 			arr = DatumGetArrayTypeP(adatum);	/* ensure not toasted */
 			if (ARR_NDIM(arr) != 1 ||
@@ -1301,7 +1294,7 @@ DeconstructFkConstraintRow(HeapTuple tuple, int *numfks,
 			num_delete_cols = ARR_DIMS(arr)[0];
 			memcpy(fk_del_set_cols, ARR_DATA_PTR(arr), num_delete_cols * sizeof(int16));
 			if ((Pointer) arr != DatumGetPointer(adatum))
-				pfree(arr);				/* free de-toasted copy, if any */
+				pfree(arr);		/* free de-toasted copy, if any */
 
 			*num_fk_del_set_cols = num_delete_cols;
 		}

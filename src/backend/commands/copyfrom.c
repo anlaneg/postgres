@@ -9,7 +9,7 @@
  * Reading data from the input file or client and parsing it into Datums
  * is handled in copyfromparse.c.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -115,21 +115,19 @@ void
 CopyFromErrorCallback(void *arg)
 {
 	CopyFromState cstate = (CopyFromState) arg;
-	char		curlineno_str[32];
-
-	snprintf(curlineno_str, sizeof(curlineno_str), UINT64_FORMAT,
-			 cstate->cur_lineno);
 
 	if (cstate->opts.binary)
 	{
 		/* can't usefully display the data */
 		if (cstate->cur_attname)
-			errcontext("COPY %s, line %s, column %s",
-					   cstate->cur_relname, curlineno_str,
+			errcontext("COPY %s, line %llu, column %s",
+					   cstate->cur_relname,
+					   (unsigned long long) cstate->cur_lineno,
 					   cstate->cur_attname);
 		else
-			errcontext("COPY %s, line %s",
-					   cstate->cur_relname, curlineno_str);
+			errcontext("COPY %s, line %llu",
+					   cstate->cur_relname,
+					   (unsigned long long) cstate->cur_lineno);
 	}
 	else
 	{
@@ -139,16 +137,19 @@ CopyFromErrorCallback(void *arg)
 			char	   *attval;
 
 			attval = limit_printout_length(cstate->cur_attval);
-			errcontext("COPY %s, line %s, column %s: \"%s\"",
-					   cstate->cur_relname, curlineno_str,
-					   cstate->cur_attname, attval);
+			errcontext("COPY %s, line %llu, column %s: \"%s\"",
+					   cstate->cur_relname,
+					   (unsigned long long) cstate->cur_lineno,
+					   cstate->cur_attname,
+					   attval);
 			pfree(attval);
 		}
 		else if (cstate->cur_attname)
 		{
 			/* error is relevant to a particular column, value is NULL */
-			errcontext("COPY %s, line %s, column %s: null input",
-					   cstate->cur_relname, curlineno_str,
+			errcontext("COPY %s, line %llu, column %s: null input",
+					   cstate->cur_relname,
+					   (unsigned long long) cstate->cur_lineno,
 					   cstate->cur_attname);
 		}
 		else
@@ -163,14 +164,16 @@ CopyFromErrorCallback(void *arg)
 				char	   *lineval;
 
 				lineval = limit_printout_length(cstate->line_buf.data);
-				errcontext("COPY %s, line %s: \"%s\"",
-						   cstate->cur_relname, curlineno_str, lineval);
+				errcontext("COPY %s, line %llu: \"%s\"",
+						   cstate->cur_relname,
+						   (unsigned long long) cstate->cur_lineno, lineval);
 				pfree(lineval);
 			}
 			else
 			{
-				errcontext("COPY %s, line %s",
-						   cstate->cur_relname, curlineno_str);
+				errcontext("COPY %s, line %llu",
+						   cstate->cur_relname,
+						   (unsigned long long) cstate->cur_lineno);
 			}
 		}
 	}
@@ -312,7 +315,7 @@ CopyMultiInsertBufferFlush(CopyMultiInsertInfo *miinfo,
 
 	/*
 	 * Print error context information correctly, if one of the operations
-	 * below fail.
+	 * below fails.
 	 */
 	cstate->line_buf_valid = false;
 	save_cur_lineno = cstate->cur_lineno;
@@ -590,12 +593,12 @@ CopyFrom(CopyFromState cstate)
 	 */
 	if (RELKIND_HAS_STORAGE(cstate->rel->rd_rel->relkind) &&
 		(cstate->rel->rd_createSubid != InvalidSubTransactionId ||
-		 cstate->rel->rd_firstRelfilenodeSubid != InvalidSubTransactionId))
+		 cstate->rel->rd_firstRelfilelocatorSubid != InvalidSubTransactionId))
 		ti_options |= TABLE_INSERT_SKIP_FSM;
 
 	/*
-	 * Optimize if new relfilenode was created in this subxact or one of its
-	 * committed children and we won't see those rows later as part of an
+	 * Optimize if new relation storage was created in this subxact or one of
+	 * its committed children and we won't see those rows later as part of an
 	 * earlier scan or command. The subxact test ensures that if this subxact
 	 * aborts then the frozen rows won't be visible after xact cleanup.  Note
 	 * that the stronger test of exactly which subtransaction created it is
@@ -637,7 +640,7 @@ CopyFrom(CopyFromState cstate)
 					 errmsg("cannot perform COPY FREEZE because of prior transaction activity")));
 
 		if (cstate->rel->rd_createSubid != GetCurrentSubTransactionId() &&
-			cstate->rel->rd_newRelfilenodeSubid != GetCurrentSubTransactionId())
+			cstate->rel->rd_newRelfilelocatorSubid != GetCurrentSubTransactionId())
 			ereport(ERROR,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("cannot perform COPY FREEZE because the table was not created or truncated in the current subtransaction")));
@@ -1339,10 +1342,6 @@ BeginCopyFrom(ParseState *pstate,
 	cstate->copy_src = COPY_FILE;	/* default */
 
 	cstate->whereClause = whereClause;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	oldcontext = MemoryContextSwitchTo(cstate->copycontext);
 
 	/* Initialize state variables */
 	cstate->eol_type = EOL_UNKNOWN;

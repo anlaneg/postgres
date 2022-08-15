@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 package Project;
 
@@ -76,11 +76,11 @@ sub AddFiles
 # name but a different file extension and add those files too.
 sub FindAndAddAdditionalFiles
 {
-	my $self = shift;
+	my $self  = shift;
 	my $fname = shift;
 	$fname =~ /(.*)(\.[^.]+)$/;
 	my $filenoext = $1;
-	my $fileext = $2;
+	my $fileext   = $2;
 
 	# For .c files, check if either a .l or .y file of the same name
 	# exists and add that too.
@@ -161,7 +161,7 @@ sub AddReference
 
 	while (my $ref = shift)
 	{
-		if (! grep { $_ eq $ref} @{ $self->{references} })
+		if (!grep { $_ eq $ref } @{ $self->{references} })
 		{
 			push @{ $self->{references} }, $ref;
 		}
@@ -181,7 +181,7 @@ sub AddLibrary
 		$lib = '&quot;' . $lib . "&quot;";
 	}
 
-	if (! grep { $_ eq $lib} @{ $self->{libraries} })
+	if (!grep { $_ eq $lib } @{ $self->{libraries} })
 	{
 		push @{ $self->{libraries} }, $lib;
 	}
@@ -199,7 +199,7 @@ sub AddIncludeDir
 
 	foreach my $inc (split(/;/, $incstr))
 	{
-		if (! grep { $_ eq $inc} @{ $self->{includes} })
+		if (!grep { $_ eq $inc } @{ $self->{includes} })
 		{
 			push @{ $self->{includes} }, $inc;
 		}
@@ -418,13 +418,6 @@ sub DisableLinkerWarnings
 sub Save
 {
 	my ($self) = @_;
-
-	# If doing DLL and haven't specified a DEF file, do a full export of all symbols
-	# in the project.
-	if ($self->{type} eq "dll" && !$self->{def})
-	{
-		$self->FullExportDLL($self->{name} . ".lib");
-	}
 
 	# Warning 4197 is about double exporting, disable this per
 	# http://connect.microsoft.com/VisualStudio/feedback/ViewFeedback.aspx?FeedbackID=99193

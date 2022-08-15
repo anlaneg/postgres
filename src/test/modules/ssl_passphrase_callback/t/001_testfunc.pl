@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 use strict;
 use warnings;
@@ -63,7 +63,8 @@ like(
 $node->append_conf('postgresql.conf', "ssl_passphrase.passphrase = 'blurfl'");
 
 # try to start the server again
-my $ret = PostgreSQL::Test::Utils::system_log('pg_ctl', '-D', $node->data_dir, '-l',
+my $ret =
+  PostgreSQL::Test::Utils::system_log('pg_ctl', '-D', $node->data_dir, '-l',
 	$node->logfile, 'start');
 
 

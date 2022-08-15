@@ -3,7 +3,7 @@
  *
  * Definitions for the WAL record format.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/access/xlogrecord.h
@@ -15,7 +15,7 @@
 #include "access/xlogdefs.h"
 #include "port/pg_crc32c.h"
 #include "storage/block.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 
 /*
  * The overall layout of an XLOG record is:
@@ -97,7 +97,7 @@ typedef struct XLogRecordBlockHeader
 								 * image) */
 
 	/* If BKPBLOCK_HAS_IMAGE, an XLogRecordBlockImageHeader struct follows */
-	/* If BKPBLOCK_SAME_REL is not set, a RelFileNode follows */
+	/* If BKPBLOCK_SAME_REL is not set, a RelFileLocator follows */
 	/* BlockNumber follows */
 } XLogRecordBlockHeader;
 
@@ -149,8 +149,11 @@ typedef struct XLogRecordBlockImageHeader
 /* compression methods supported */
 #define BKPIMAGE_COMPRESS_PGLZ	0x04
 #define BKPIMAGE_COMPRESS_LZ4	0x08
+#define BKPIMAGE_COMPRESS_ZSTD	0x10
+
 #define	BKPIMAGE_COMPRESSED(info) \
-	((info & (BKPIMAGE_COMPRESS_PGLZ | BKPIMAGE_COMPRESS_LZ4)) != 0)
+	((info & (BKPIMAGE_COMPRESS_PGLZ | BKPIMAGE_COMPRESS_LZ4 | \
+			  BKPIMAGE_COMPRESS_ZSTD)) != 0)
 
 /*
  * Extra header information used when page image has "hole" and
@@ -172,7 +175,7 @@ typedef struct XLogRecordBlockCompressHeader
 	(SizeOfXLogRecordBlockHeader + \
 	 SizeOfXLogRecordBlockImageHeader + \
 	 SizeOfXLogRecordBlockCompressHeader + \
-	 sizeof(RelFileNode) + \
+	 sizeof(RelFileLocator) + \
 	 sizeof(BlockNumber))
 
 /*
@@ -184,7 +187,8 @@ typedef struct XLogRecordBlockCompressHeader
 #define BKPBLOCK_HAS_IMAGE	0x10	/* block data is an XLogRecordBlockImage */
 #define BKPBLOCK_HAS_DATA	0x20
 #define BKPBLOCK_WILL_INIT	0x40	/* redo will re-init the page */
-#define BKPBLOCK_SAME_REL	0x80	/* RelFileNode omitted, same as previous */
+#define BKPBLOCK_SAME_REL	0x80	/* RelFileLocator omitted, same as
+									 * previous */
 
 /*
  * XLogRecordDataHeaderShort/Long are used for the "main data" portion of

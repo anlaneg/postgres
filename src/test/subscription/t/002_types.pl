@@ -1,5 +1,5 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # This tests that more complex datatypes are replicated correctly
 # by logical replication
@@ -7,7 +7,7 @@ use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 4;
+use Test::More;
 
 # Initialize publisher node
 my $node_publisher = PostgreSQL::Test::Cluster->new('publisher');
@@ -114,13 +114,8 @@ $node_subscriber->safe_psql('postgres',
 	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub WITH (slot_name = tap_sub_slot)"
 );
 
-$node_publisher->wait_for_catchup('tap_sub');
-
 # Wait for initial sync to finish as well
-my $synced_query =
-  "SELECT count(1) = 0 FROM pg_subscription_rel WHERE srsubstate NOT IN ('s', 'r');";
-$node_subscriber->poll_query_until('postgres', $synced_query)
-  or die "Timed out while waiting for subscriber to synchronize data";
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub');
 
 # Insert initial test data
 $node_publisher->safe_psql(
@@ -566,3 +561,5 @@ is($result, '21', 'sql-function constraint on domain');
 
 $node_subscriber->stop('fast');
 $node_publisher->stop('fast');
+
+done_testing();

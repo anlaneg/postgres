@@ -7,7 +7,7 @@
  *
  * src/backend/utils/misc/ps_status.c
  *
- * Copyright (c) 2000-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2000-2022, PostgreSQL Global Development Group
  * various details abducted from various places
  *--------------------------------------------------------------------
  */
@@ -15,9 +15,6 @@
 #include "postgres.h"
 
 #include <unistd.h>
-#ifdef HAVE_SYS_PSTAT_H
-#include <sys/pstat.h>			/* for HP-UX */
-#endif
 #ifdef HAVE_PS_STRINGS
 #include <machine/vmparam.h>	/* for old BSD */
 #include <sys/exec.h>
@@ -45,9 +42,6 @@ bool		update_process_title = true;
  * PS_USE_SETPROCTITLE
  *	   use the function setproctitle(const char *, ...)
  *	   (newer BSD systems)
- * PS_USE_PSTAT
- *	   use the pstat(PSTAT_SETCMD, )
- *	   (HPUX)
  * PS_USE_PS_STRINGS
  *	   assign PS_STRINGS->ps_argvstr = "string"
  *	   (some BSD systems)
@@ -67,8 +61,6 @@ bool		update_process_title = true;
 #define PS_USE_SETPROCTITLE_FAST
 #elif defined(HAVE_SETPROCTITLE)
 #define PS_USE_SETPROCTITLE
-#elif defined(HAVE_PSTAT) && defined(PSTAT_SETCMD)
-#define PS_USE_PSTAT
 #elif defined(HAVE_PS_STRINGS)
 #define PS_USE_PS_STRINGS
 #elif (defined(BSD) || defined(__hurd__)) && !defined(__darwin__)
@@ -376,15 +368,6 @@ set_ps_display(const char *activity)
 	setproctitle_fast("%s", ps_buffer);
 #endif
 
-#ifdef PS_USE_PSTAT
-	{
-		union pstun pst;
-
-		pst.pst_command = ps_buffer;
-		pstat(PSTAT_SETCMD, pst, ps_buffer_cur_len, 0, 0);
-	}
-#endif							/* PS_USE_PSTAT */
-
 #ifdef PS_USE_PS_STRINGS
 	PS_STRINGS->ps_nargvstr = 1;
 	PS_STRINGS->ps_argvstr = ps_buffer;
@@ -443,6 +426,7 @@ get_ps_display(int *displen)
 
 	return ps_buffer + ps_buffer_fixed_size;
 #else
+	*displen = 0;
 	return "";
 #endif
 }

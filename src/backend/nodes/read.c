@@ -4,7 +4,7 @@
  *	  routines to convert a string (legal ascii representation of node) back
  *	  to nodes
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -235,7 +235,7 @@ debackslash(const char *token, int length)
  * nodeTokenType -
  *	  returns the type of the node token contained in token.
  *	  It returns one of the following valid NodeTags:
- *		T_Integer, T_Float, T_String, T_BitString
+ *		T_Integer, T_Float, T_Boolean, T_String, T_BitString
  *	  and some of its own:
  *		RIGHT_PAREN, LEFT_PAREN, LEFT_BRACE, OTHER_TOKEN
  *
@@ -283,6 +283,9 @@ nodeTokenType(const char *token, int length)
 		retval = RIGHT_PAREN;
 	else if (*token == '{')
 		retval = LEFT_BRACE;
+	else if ((length == 4 && strncmp(token, "true", 4) == 0) ||
+			 (length == 5 && strncmp(token, "false", 5) == 0))
+		retval = T_Boolean;
 	else if (*token == '"' && length > 1 && token[length - 1] == '"')
 		retval = T_String;
 	else if (*token == 'b')
@@ -298,10 +301,10 @@ nodeTokenType(const char *token, int length)
  *
  * This routine applies some semantic knowledge on top of the purely
  * lexical tokenizer pg_strtok().   It can read
- *	* Value token nodes (integers, floats, or strings);
+ *	* Value token nodes (integers, floats, booleans, or strings);
  *	* General nodes (via parseNodeString() from readfuncs.c);
  *	* Lists of the above;
- *	* Lists of integers or OIDs.
+ *	* Lists of integers, OIDs, or TransactionIds.
  * The return value is declared void *, not Node *, to avoid having to
  * cast it explicitly in callers that assign to fields of different types.
  *
@@ -343,6 +346,7 @@ nodeRead(const char *token, int tok_len)
 				/*----------
 				 * Could be an integer list:	(i int int ...)
 				 * or an OID list:				(o int int ...)
+				 * or an XID list:				(x int int ...)
 				 * or a list of nodes/values:	(node node ...)
 				 *----------
 				 */
@@ -387,6 +391,26 @@ nodeRead(const char *token, int tok_len)
 							elog(ERROR, "unrecognized OID: \"%.*s\"",
 								 tok_len, token);
 						l = lappend_oid(l, val);
+					}
+				}
+				else if (tok_len == 1 && token[0] == 'x')
+				{
+					/* List of TransactionIds */
+					for (;;)
+					{
+						TransactionId val;
+						char	   *endptr;
+
+						token = pg_strtok(&tok_len);
+						if (token == NULL)
+							elog(ERROR, "unterminated List structure");
+						if (token[0] == ')')
+							break;
+						val = (TransactionId) strtoul(token, &endptr, 10);
+						if (endptr != token + tok_len)
+							elog(ERROR, "unrecognized Xid: \"%.*s\"",
+								 tok_len, token);
+						l = lappend_xid(l, val);
 					}
 				}
 				else
@@ -437,6 +461,9 @@ nodeRead(const char *token, int tok_len)
 				fval[tok_len] = '\0';
 				result = (Node *) makeFloat(fval);
 			}
+			break;
+		case T_Boolean:
+			result = (Node *) makeBoolean(token[0] == 't');
 			break;
 		case T_String:
 			/* need to remove leading and trailing quotes, and backslashes */

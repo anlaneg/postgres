@@ -7,7 +7,7 @@
  *	  transfer pending entries into the regular index structure.  This
  *	  wins because bulk insertion is much more efficient than retail.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -235,7 +235,7 @@ ginHeapTupleFastInsert(GinState *ginstate, GinTupleCollector *collector)
 
 	needWal = RelationNeedsWAL(index);
 
-	data.node = index->rd_node;
+	data.locator = index->rd_locator;
 	data.ntuples = 0;
 	data.newRightlink = data.prevTail = InvalidBlockNumber;
 

@@ -5,7 +5,7 @@
  *	  Routines for CREATE and DROP FUNCTION commands and CREATE and DROP
  *	  CAST commands.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -468,10 +468,8 @@ interpret_function_parameter_list(ParseState *pstate,
 
 	if (outCount > 0 || varCount > 0)
 	{
-		*allParameterTypes = construct_array(allTypes, parameterCount, OIDOID,
-											 sizeof(Oid), true, TYPALIGN_INT);
-		*parameterModes = construct_array(paramModes, parameterCount, CHAROID,
-										  1, true, TYPALIGN_CHAR);
+		*allParameterTypes = construct_array_builtin(allTypes, parameterCount, OIDOID);
+		*parameterModes = construct_array_builtin(paramModes, parameterCount, CHAROID);
 		if (outCount > 1)
 			*requiredResultType = RECORDOID;
 		/* otherwise we set requiredResultType correctly above */
@@ -489,8 +487,7 @@ interpret_function_parameter_list(ParseState *pstate,
 			if (paramNames[i] == PointerGetDatum(NULL))
 				paramNames[i] = CStringGetTextDatum("");
 		}
-		*parameterNames = construct_array(paramNames, parameterCount, TEXTOID,
-										  -1, false, TYPALIGN_INT);
+		*parameterNames = construct_array_builtin(paramNames, parameterCount, TEXTOID);
 	}
 	else
 		*parameterNames = NULL;
@@ -813,15 +810,15 @@ compute_function_attributes(ParseState *pstate,
 	if (transform_item)
 		*transform = transform_item->arg;
 	if (windowfunc_item)
-		*windowfunc_p = intVal(windowfunc_item->arg);
+		*windowfunc_p = boolVal(windowfunc_item->arg);
 	if (volatility_item)
 		*volatility_p = interpret_func_volatility(volatility_item);
 	if (strict_item)
-		*strict_p = intVal(strict_item->arg);
+		*strict_p = boolVal(strict_item->arg);
 	if (security_item)
-		*security_definer = intVal(security_item->arg);
+		*security_definer = boolVal(security_item->arg);
 	if (leakproof_item)
-		*leakproof_p = intVal(leakproof_item->arg);
+		*leakproof_p = boolVal(leakproof_item->arg);
 	if (set_items)
 		*proconfig = update_proconfig_value(NULL, set_items);
 	if (cost_item)
@@ -1222,8 +1219,7 @@ CreateFunction(ParseState *pstate, CreateFunctionStmt *stmt)
 		i = 0;
 		foreach(lc, trftypes_list)
 			arr[i++] = ObjectIdGetDatum(lfirst_oid(lc));
-		trftypes = construct_array(arr, list_length(trftypes_list),
-								   OIDOID, sizeof(Oid), true, TYPALIGN_INT);
+		trftypes = construct_array_builtin(arr, list_length(trftypes_list), OIDOID);
 	}
 	else
 	{
@@ -1325,6 +1321,8 @@ RemoveFunctionById(Oid funcOid)
 
 	table_close(relation, RowExclusiveLock);
 
+	pgstat_drop_function(funcOid);
+
 	/*
 	 * If there's a pg_aggregate tuple, delete that too.
 	 */
@@ -1417,12 +1415,12 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 	if (volatility_item)
 		procForm->provolatile = interpret_func_volatility(volatility_item);
 	if (strict_item)
-		procForm->proisstrict = intVal(strict_item->arg);
+		procForm->proisstrict = boolVal(strict_item->arg);
 	if (security_def_item)
-		procForm->prosecdef = intVal(security_def_item->arg);
+		procForm->prosecdef = boolVal(security_def_item->arg);
 	if (leakproof_item)
 	{
-		procForm->proleakproof = intVal(leakproof_item->arg);
+		procForm->proleakproof = boolVal(leakproof_item->arg);
 		if (procForm->proleakproof && !superuser())
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -1470,6 +1468,8 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 
 		procForm->prosupport = newsupport;
 	}
+	if (parallel_item)
+		procForm->proparallel = interpret_func_parallel(parallel_item);
 	if (set_items)
 	{
 		Datum		datum;
@@ -1504,8 +1504,7 @@ AlterFunction(ParseState *pstate, AlterFunctionStmt *stmt)
 		tup = heap_modify_tuple(tup, RelationGetDescr(rel),
 								repl_val, repl_null, repl_repl);
 	}
-	if (parallel_item)
-		procForm->proparallel = interpret_func_parallel(parallel_item);
+	/* DO NOT put more touches of procForm below here; it's now dangling. */
 
 	/* Do the update */
 	CatalogTupleUpdate(rel, &tup->t_self, tup);
@@ -1807,8 +1806,8 @@ CreateTransform(CreateTransformStmt *stmt)
 	AclResult	aclresult;
 	Form_pg_proc procstruct;
 	Datum		values[Natts_pg_transform];
-	bool		nulls[Natts_pg_transform];
-	bool		replaces[Natts_pg_transform];
+	bool		nulls[Natts_pg_transform] = {0};
+	bool		replaces[Natts_pg_transform] = {0};
 	Oid			transformid;
 	HeapTuple	tuple;
 	HeapTuple	newtuple;
@@ -1914,8 +1913,6 @@ CreateTransform(CreateTransformStmt *stmt)
 	values[Anum_pg_transform_trffromsql - 1] = ObjectIdGetDatum(fromsqlfuncid);
 	values[Anum_pg_transform_trftosql - 1] = ObjectIdGetDatum(tosqlfuncid);
 
-	MemSet(nulls, false, sizeof(nulls));
-
 	relation = table_open(TransformRelationId, RowExclusiveLock);
 
 	tuple = SearchSysCache2(TRFTYPELANG,
@@ -1932,7 +1929,6 @@ CreateTransform(CreateTransformStmt *stmt)
 							format_type_be(typeid),
 							stmt->lang)));
 
-		MemSet(replaces, false, sizeof(replaces));
 		replaces[Anum_pg_transform_trffromsql - 1] = true;
 		replaces[Anum_pg_transform_trftosql - 1] = true;
 

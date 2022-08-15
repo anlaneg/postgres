@@ -4,7 +4,7 @@
  *	  XML data type support.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/backend/utils/adt/xml.c
@@ -220,8 +220,7 @@ const TableFuncRoutine XmlTableRoutine =
 	ereport(ERROR, \
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED), \
 			 errmsg("unsupported XML feature"), \
-			 errdetail("This functionality requires the server to be built with libxml support."), \
-			 errhint("You need to rebuild PostgreSQL using %s.", "--with-libxml")))
+			 errdetail("This functionality requires the server to be built with libxml support.")))
 
 
 /* from SQL/XML:2008 section 4.9 */
@@ -3659,7 +3658,7 @@ map_sql_type_to_xmlschema_type(Oid typeoid, int typmod)
 			case TIMEOID:
 			case TIMETZOID:
 				{
-					const char *tz = (typeoid == TIMETZOID ? "(+|-)\\p{Nd}{2}:\\p{Nd}{2}" : "");
+					const char *tz = (typeoid == TIMETZOID ? "(\\+|-)\\p{Nd}{2}:\\p{Nd}{2}" : "");
 
 					if (typmod == -1)
 						appendStringInfo(&result,
@@ -3682,7 +3681,7 @@ map_sql_type_to_xmlschema_type(Oid typeoid, int typmod)
 			case TIMESTAMPOID:
 			case TIMESTAMPTZOID:
 				{
-					const char *tz = (typeoid == TIMESTAMPTZOID ? "(+|-)\\p{Nd}{2}:\\p{Nd}{2}" : "");
+					const char *tz = (typeoid == TIMESTAMPTZOID ? "(\\+|-)\\p{Nd}{2}:\\p{Nd}{2}" : "");
 
 					if (typmod == -1)
 						appendStringInfo(&result,
@@ -4018,9 +4017,9 @@ xpath_internal(text *xpath_expr_text, xmltype *data, ArrayType *namespaces,
 
 		Assert(ARR_ELEMTYPE(namespaces) == TEXTOID);
 
-		deconstruct_array(namespaces, TEXTOID, -1, false, TYPALIGN_INT,
-						  &ns_names_uris, &ns_names_uris_nulls,
-						  &ns_count);
+		deconstruct_array_builtin(namespaces, TEXTOID,
+								  &ns_names_uris, &ns_names_uris_nulls,
+								  &ns_count);
 
 		Assert((ns_count % 2) == 0);	/* checked above */
 		ns_count /= 2;			/* count pairs only */

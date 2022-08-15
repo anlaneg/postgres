@@ -4,7 +4,7 @@
 #
 # Module encapsulating Postgres Version numbers
 #
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 #
 ############################################################################
 
@@ -151,14 +151,14 @@ a dot unless the separator argument is given.
 
 sub major
 {
-    my ($self, %params) = @_;
-    my $result = $self->{num}->[0];
-    if ($result + 0 < 10)
-    {
-        my $sep = $params{separator} || '.';
-        $result .= "$sep$self->{num}->[1]";
-    }
-    return $result;
+	my ($self, %params) = @_;
+	my $result = $self->{num}->[0];
+	if ($result + 0 < 10)
+	{
+		my $sep = $params{separator} || '.';
+		$result .= "$sep$self->{num}->[1]";
+	}
+	return $result;
 }
 
 1;

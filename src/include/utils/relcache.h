@@ -4,7 +4,7 @@
  *	  Relation descriptor cache definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/relcache.h
@@ -55,10 +55,10 @@ extern bytea **RelationGetIndexAttOptions(Relation relation, bool copy);
 
 typedef enum IndexAttrBitmapKind
 {
+	INDEX_ATTR_BITMAP_ALL,
 	INDEX_ATTR_BITMAP_KEY,
 	INDEX_ATTR_BITMAP_PRIMARY_KEY,
-	INDEX_ATTR_BITMAP_IDENTITY_KEY,
-	INDEX_ATTR_BITMAP_HOT_BLOCKING
+	INDEX_ATTR_BITMAP_IDENTITY_KEY
 } IndexAttrBitmapKind;
 
 extern Bitmapset *RelationGetIndexAttrBitmap(Relation relation,
@@ -74,8 +74,9 @@ extern void RelationGetExclusionInfo(Relation indexRelation,
 extern void RelationInitIndexAccessInfo(Relation relation);
 
 /* caller must include pg_publication.h */
-struct PublicationActions;
-extern struct PublicationActions *GetRelationPublicationActions(Relation relation);
+struct PublicationDesc;
+extern void RelationBuildPublicationDesc(Relation relation,
+										 struct PublicationDesc *pubdesc);
 
 extern void RelationInitTableAccessMethod(Relation relation);
 
@@ -102,7 +103,7 @@ extern Relation RelationBuildLocalRelation(const char *relname,
 										   TupleDesc tupDesc,
 										   Oid relid,
 										   Oid accessmtd,
-										   Oid relfilenode,
+										   RelFileNumber relfilenumber,
 										   Oid reltablespace,
 										   bool shared_relation,
 										   bool mapped_relation,
@@ -110,10 +111,10 @@ extern Relation RelationBuildLocalRelation(const char *relname,
 										   char relkind);
 
 /*
- * Routines to manage assignment of new relfilenode to a relation
+ * Routines to manage assignment of new relfilenumber to a relation
  */
-extern void RelationSetNewRelfilenode(Relation relation, char persistence);
-extern void RelationAssumeNewRelfilenode(Relation relation);
+extern void RelationSetNewRelfilenumber(Relation relation, char persistence);
+extern void RelationAssumeNewRelfilelocator(Relation relation);
 
 /*
  * Routines for flushing/rebuilding relcache entries in various scenarios
@@ -144,9 +145,9 @@ extern void RelationCacheInitFilePostInvalidate(void);
 extern void RelationCacheInitFileRemove(void);
 
 /* should be used only by relcache.c and catcache.c */
-extern bool criticalRelcachesBuilt;
+extern PGDLLIMPORT bool criticalRelcachesBuilt;
 
 /* should be used only by relcache.c and postinit.c */
-extern bool criticalSharedRelcachesBuilt;
+extern PGDLLIMPORT bool criticalSharedRelcachesBuilt;
 
 #endif							/* RELCACHE_H */

@@ -3,7 +3,7 @@
  * orderedsetaggs.c
  *		Ordered-set aggregate functions.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -118,6 +118,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 	OSAPerQueryState *qstate;
 	MemoryContext gcontext;
 	MemoryContext oldcontext;
+	int			tuplesortopt;
 
 	/*
 	 * Check we're called as aggregate (and not a window function), and get
@@ -283,6 +284,11 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 	osastate->qstate = qstate;
 	osastate->gcontext = gcontext;
 
+	tuplesortopt = TUPLESORT_NONE;
+
+	if (qstate->rescan_needed)
+		tuplesortopt |= TUPLESORT_RANDOMACCESS;
+
 	/*
 	 * Initialize tuplesort object.
 	 */
@@ -295,7 +301,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 												   qstate->sortNullsFirsts,
 												   work_mem,
 												   NULL,
-												   qstate->rescan_needed);
+												   tuplesortopt);
 	else
 		osastate->sortstate = tuplesort_begin_datum(qstate->sortColType,
 													qstate->sortOperator,
@@ -303,7 +309,7 @@ ordered_set_startup(FunctionCallInfo fcinfo, bool use_tuples)
 													qstate->sortNullsFirst,
 													work_mem,
 													NULL,
-													qstate->rescan_needed);
+													tuplesortopt);
 
 	osastate->number_of_rows = 0;
 	osastate->sort_done = false;
@@ -753,12 +759,10 @@ percentile_disc_multi_final(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 	param = PG_GETARG_ARRAYTYPE_P(1);
 
-	deconstruct_array(param, FLOAT8OID,
-	/* hard-wired info on type float8 */
-					  sizeof(float8), FLOAT8PASSBYVAL, TYPALIGN_DOUBLE,
-					  &percentiles_datum,
-					  &percentiles_null,
-					  &num_percentiles);
+	deconstruct_array_builtin(param, FLOAT8OID,
+							  &percentiles_datum,
+							  &percentiles_null,
+							  &num_percentiles);
 
 	if (num_percentiles == 0)
 		PG_RETURN_POINTER(construct_empty_array(osastate->qstate->sortColType));
@@ -877,12 +881,10 @@ percentile_cont_multi_final_common(FunctionCallInfo fcinfo,
 		PG_RETURN_NULL();
 	param = PG_GETARG_ARRAYTYPE_P(1);
 
-	deconstruct_array(param, FLOAT8OID,
-	/* hard-wired info on type float8 */
-					  sizeof(float8), FLOAT8PASSBYVAL, TYPALIGN_DOUBLE,
-					  &percentiles_datum,
-					  &percentiles_null,
-					  &num_percentiles);
+	deconstruct_array_builtin(param, FLOAT8OID,
+							  &percentiles_datum,
+							  &percentiles_null,
+							  &num_percentiles);
 
 	if (num_percentiles == 0)
 		PG_RETURN_POINTER(construct_empty_array(osastate->qstate->sortColType));

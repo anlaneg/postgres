@@ -2,7 +2,7 @@
  *
  * pg_ctl --- start/stops/restarts the PostgreSQL server
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  *
  * src/bin/pg_ctl/pg_ctl.c
  *
@@ -14,14 +14,12 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <time.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#ifdef HAVE_SYS_RESOURCE_H
-#include <sys/time.h>
-#include <sys/resource.h>
-#endif
 
 #include "catalog/pg_control.h"
 #include "common/controldata_utils.h"
@@ -155,10 +153,12 @@ static void free_readfile(char **optlines);
 static pgpid_t start_postmaster(void);
 static void read_post_opts(void);
 
-static WaitPMResult wait_for_postmaster(pgpid_t pm_pid, bool do_checkpoint);
+static WaitPMResult wait_for_postmaster_start(pgpid_t pm_pid, bool do_checkpoint);
+static bool wait_for_postmaster_stop(void);
+static bool wait_for_postmaster_promote(void);
 static bool postmaster_is_alive(pid_t pid);
 
-#if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
+#if defined(HAVE_GETRLIMIT)
 static void unlimit_core_size(void);
 #endif
 
@@ -451,6 +451,10 @@ start_postmaster(void)
 	fflush(stdout);
 	fflush(stderr);
 
+#ifdef EXEC_BACKEND
+	pg_disable_aslr();
+#endif
+
 	pm_pid = fork();
 	if (pm_pid < 0)
 	{
@@ -590,7 +594,7 @@ start_postmaster(void)
  * manager checkpoint, it's got nothing to do with database checkpoints!!
  */
 static WaitPMResult
-wait_for_postmaster(pgpid_t pm_pid, bool do_checkpoint)
+wait_for_postmaster_start(pgpid_t pm_pid, bool do_checkpoint)
 {
 	int			i;
 
@@ -700,7 +704,77 @@ wait_for_postmaster(pgpid_t pm_pid, bool do_checkpoint)
 }
 
 
-#if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
+/*
+ * Wait for the postmaster to stop.
+ *
+ * Returns true if the postmaster stopped cleanly (i.e., removed its pidfile).
+ * Returns false if the postmaster dies uncleanly, or if we time out.
+ */
+static bool
+wait_for_postmaster_stop(void)
+{
+	int			cnt;
+
+	for (cnt = 0; cnt < wait_seconds * WAITS_PER_SEC; cnt++)
+	{
+		pgpid_t		pid;
+
+		if ((pid = get_pgpid(false)) == 0)
+			return true;		/* pid file is gone */
+
+		if (kill((pid_t) pid, 0) != 0)
+		{
+			/*
+			 * Postmaster seems to have died.  Check the pid file once more to
+			 * avoid a race condition, but give up waiting.
+			 */
+			if (get_pgpid(false) == 0)
+				return true;	/* pid file is gone */
+			return false;		/* postmaster died untimely */
+		}
+
+		if (cnt % WAITS_PER_SEC == 0)
+			print_msg(".");
+		pg_usleep(USEC_PER_SEC / WAITS_PER_SEC);
+	}
+	return false;				/* timeout reached */
+}
+
+
+/*
+ * Wait for the postmaster to promote.
+ *
+ * Returns true on success, else false.
+ * To avoid waiting uselessly, we check for postmaster death here too.
+ */
+static bool
+wait_for_postmaster_promote(void)
+{
+	int			cnt;
+
+	for (cnt = 0; cnt < wait_seconds * WAITS_PER_SEC; cnt++)
+	{
+		pgpid_t		pid;
+		DBState		state;
+
+		if ((pid = get_pgpid(false)) == 0)
+			return false;		/* pid file is gone */
+		if (kill((pid_t) pid, 0) != 0)
+			return false;		/* postmaster died */
+
+		state = get_control_dbstate();
+		if (state == DB_IN_PRODUCTION)
+			return true;		/* successful promotion */
+
+		if (cnt % WAITS_PER_SEC == 0)
+			print_msg(".");
+		pg_usleep(USEC_PER_SEC / WAITS_PER_SEC);
+	}
+	return false;				/* timeout reached */
+}
+
+
+#if defined(HAVE_GETRLIMIT)
 static void
 unlimit_core_size(void)
 {
@@ -810,14 +884,10 @@ find_other_exec_or_die(const char *argv0, const char *target, const char *versio
 			strlcpy(full_path, progname, sizeof(full_path));
 
 		if (ret == -1)
-			write_stderr(_("The program \"%s\" is needed by %s but was not found in the\n"
-						   "same directory as \"%s\".\n"
-						   "Check your installation.\n"),
+			write_stderr(_("program \"%s\" is needed by %s but was not found in the same directory as \"%s\"\n"),
 						 target, progname, full_path);
 		else
-			write_stderr(_("The program \"%s\" was found by \"%s\"\n"
-						   "but was not the same version as %s.\n"
-						   "Check your installation.\n"),
+			write_stderr(_("program \"%s\" was found by \"%s\" but was not the same version as %s\n"),
 						 target, full_path, progname);
 		exit(1);
 	}
@@ -877,7 +947,7 @@ do_start(void)
 	if (exec_path == NULL)
 		exec_path = find_other_exec_or_die(argv0, "postgres", PG_BACKEND_VERSIONSTR);
 
-#if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
+#if defined(HAVE_GETRLIMIT)
 	if (allow_core_files)
 		unlimit_core_size();
 #endif
@@ -913,7 +983,7 @@ do_start(void)
 
 		print_msg(_("waiting for server to start..."));
 
-		switch (wait_for_postmaster(pm_pid, false))
+		switch (wait_for_postmaster_start(pm_pid, false))
 		{
 			case POSTMASTER_READY:
 				print_msg(_(" done\n"));
@@ -948,9 +1018,7 @@ do_start(void)
 static void
 do_stop(void)
 {
-	int			cnt;
 	pgpid_t		pid;
-	struct stat statbuf;
 
 	pid = get_pgpid(false);
 
@@ -983,35 +1051,9 @@ do_stop(void)
 	}
 	else
 	{
-		/*
-		 * If backup_label exists, an online backup is running. Warn the user
-		 * that smart shutdown will wait for it to finish. However, if the
-		 * server is in archive recovery, we're recovering from an online
-		 * backup instead of performing one.
-		 */
-		if (shutdown_mode == SMART_MODE &&
-			stat(backup_file, &statbuf) == 0 &&
-			get_control_dbstate() != DB_IN_ARCHIVE_RECOVERY)
-		{
-			print_msg(_("WARNING: online backup mode is active\n"
-						"Shutdown will not complete until pg_stop_backup() is called.\n\n"));
-		}
-
 		print_msg(_("waiting for server to shut down..."));
 
-		for (cnt = 0; cnt < wait_seconds * WAITS_PER_SEC; cnt++)
-		{
-			if ((pid = get_pgpid(false)) != 0)
-			{
-				if (cnt % WAITS_PER_SEC == 0)
-					print_msg(".");
-				pg_usleep(USEC_PER_SEC / WAITS_PER_SEC);
-			}
-			else
-				break;
-		}
-
-		if (pid != 0)			/* pid file still exists */
+		if (!wait_for_postmaster_stop())
 		{
 			print_msg(_(" failed\n"));
 
@@ -1035,9 +1077,7 @@ do_stop(void)
 static void
 do_restart(void)
 {
-	int			cnt;
 	pgpid_t		pid;
-	struct stat statbuf;
 
 	pid = get_pgpid(false);
 
@@ -1072,37 +1112,10 @@ do_restart(void)
 			exit(1);
 		}
 
-		/*
-		 * If backup_label exists, an online backup is running. Warn the user
-		 * that smart shutdown will wait for it to finish. However, if the
-		 * server is in archive recovery, we're recovering from an online
-		 * backup instead of performing one.
-		 */
-		if (shutdown_mode == SMART_MODE &&
-			stat(backup_file, &statbuf) == 0 &&
-			get_control_dbstate() != DB_IN_ARCHIVE_RECOVERY)
-		{
-			print_msg(_("WARNING: online backup mode is active\n"
-						"Shutdown will not complete until pg_stop_backup() is called.\n\n"));
-		}
-
 		print_msg(_("waiting for server to shut down..."));
 
 		/* always wait for restart */
-
-		for (cnt = 0; cnt < wait_seconds * WAITS_PER_SEC; cnt++)
-		{
-			if ((pid = get_pgpid(false)) != 0)
-			{
-				if (cnt % WAITS_PER_SEC == 0)
-					print_msg(".");
-				pg_usleep(USEC_PER_SEC / WAITS_PER_SEC);
-			}
-			else
-				break;
-		}
-
-		if (pid != 0)			/* pid file still exists */
+		if (!wait_for_postmaster_stop())
 		{
 			print_msg(_(" failed\n"));
 
@@ -1222,21 +1235,8 @@ do_promote(void)
 
 	if (do_wait)
 	{
-		DBState		state = DB_STARTUP;
-		int			cnt;
-
 		print_msg(_("waiting for server to promote..."));
-		for (cnt = 0; cnt < wait_seconds * WAITS_PER_SEC; cnt++)
-		{
-			state = get_control_dbstate();
-			if (state == DB_IN_PRODUCTION)
-				break;
-
-			if (cnt % WAITS_PER_SEC == 0)
-				print_msg(".");
-			pg_usleep(USEC_PER_SEC / WAITS_PER_SEC);
-		}
-		if (state == DB_IN_PRODUCTION)
+		if (wait_for_postmaster_promote())
 		{
 			print_msg(_(" done\n"));
 			print_msg(_("server promoted\n"));
@@ -1655,7 +1655,7 @@ pgwin32_ServiceMain(DWORD argc, LPTSTR *argv)
 	if (do_wait)
 	{
 		write_eventlog(EVENTLOG_INFORMATION_TYPE, _("Waiting for server startup...\n"));
-		if (wait_for_postmaster(postmasterPID, true) != POSTMASTER_READY)
+		if (wait_for_postmaster_start(postmasterPID, true) != POSTMASTER_READY)
 		{
 			write_eventlog(EVENTLOG_ERROR_TYPE, _("Timed out waiting for server startup\n"));
 			pgwin32_SetServiceStatus(SERVICE_STOPPED);
@@ -1676,7 +1676,7 @@ pgwin32_ServiceMain(DWORD argc, LPTSTR *argv)
 			{
 				/*
 				 * status.dwCheckPoint can be incremented by
-				 * wait_for_postmaster(), so it might not start from 0.
+				 * wait_for_postmaster_start(), so it might not start from 0.
 				 */
 				int			maxShutdownCheckPoint = status.dwCheckPoint + 12;
 
@@ -1748,7 +1748,7 @@ typedef BOOL (WINAPI * __QueryInformationJobObject) (HANDLE, JOBOBJECTINFOCLASS,
  * achieves the goal of postmaster running in a similar environment as pg_ctl.
  */
 static void
-InheritStdHandles(STARTUPINFO* si)
+InheritStdHandles(STARTUPINFO *si)
 {
 	si->dwFlags |= STARTF_USESTDHANDLES;
 	si->hStdInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -1800,8 +1800,8 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	si.cb = sizeof(si);
 
 	/*
-	 * Set stdin/stdout/stderr handles to be inherited in the child
-	 * process. That allows postmaster and the processes it starts to perform
+	 * Set stdin/stdout/stderr handles to be inherited in the child process.
+	 * That allows postmaster and the processes it starts to perform
 	 * additional checks to see if running in a service (otherwise they get
 	 * the default console handles - which point to "somewhere").
 	 */
@@ -1894,17 +1894,8 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 	/* Verify that we found all functions */
 	if (_IsProcessInJob == NULL || _CreateJobObject == NULL || _SetInformationJobObject == NULL || _AssignProcessToJobObject == NULL || _QueryInformationJobObject == NULL)
 	{
-		/*
-		 * IsProcessInJob() is not available on < WinXP, so there is no need
-		 * to log the error every time in that case
-		 */
-		if (IsWindowsXPOrGreater())
-
-			/*
-			 * Log error if we can't get version, or if we're on WinXP/2003 or
-			 * newer
-			 */
-			write_stderr(_("%s: WARNING: could not locate all job object functions in system API\n"), progname);
+		/* Log error if we can't get version */
+		write_stderr(_("%s: WARNING: could not locate all job object functions in system API\n"), progname);
 	}
 	else
 	{
@@ -1944,19 +1935,6 @@ CreateRestrictedProcess(char *cmd, PROCESS_INFORMATION *processInfo, bool as_ser
 						JOB_OBJECT_UILIMIT_EXITWINDOWS | JOB_OBJECT_UILIMIT_READCLIPBOARD |
 						JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
 
-					if (as_service)
-					{
-						if (!IsWindows7OrGreater())
-						{
-							/*
-							 * On Windows 7 (and presumably later),
-							 * JOB_OBJECT_UILIMIT_HANDLES prevents us from
-							 * starting as a service. So we only enable it on
-							 * Vista and earlier (version <= 6.0)
-							 */
-							uiRestrictions.UIRestrictionsClass |= JOB_OBJECT_UILIMIT_HANDLES;
-						}
-					}
 					_SetInformationJobObject(job, JobObjectBasicUIRestrictions, &uiRestrictions, sizeof(uiRestrictions));
 
 					securityLimit.SecurityLimitFlags = JOB_OBJECT_SECURITY_NO_ADMIN | JOB_OBJECT_SECURITY_ONLY_TOKEN;
@@ -2089,7 +2067,7 @@ do_help(void)
 	printf(_("If the -D option is omitted, the environment variable PGDATA is used.\n"));
 
 	printf(_("\nOptions for start or restart:\n"));
-#if defined(HAVE_GETRLIMIT) && defined(RLIMIT_CORE)
+#if defined(HAVE_GETRLIMIT)
 	printf(_("  -c, --core-files       allow postgres to produce core files\n"));
 #else
 	printf(_("  -c, --core-files       not applicable on this platform\n"));

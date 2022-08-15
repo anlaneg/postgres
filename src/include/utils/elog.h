@@ -4,7 +4,7 @@
  *	  POSTGRES error reporting/logging definitions.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/utils/elog.h
@@ -15,6 +15,8 @@
 #define ELOG_H
 
 #include <setjmp.h>
+
+#include "lib/stringinfo.h"
 
 /* Error level codes */
 #define DEBUG5		10			/* Debugging messages, in categories of
@@ -138,7 +140,7 @@
 		if (__builtin_constant_p(elevel) && (elevel) >= ERROR ? \
 			errstart_cold(elevel, domain) : \
 			errstart(elevel, domain)) \
-			__VA_ARGS__, errfinish(__FILE__, __LINE__, PG_FUNCNAME_MACRO); \
+			__VA_ARGS__, errfinish(__FILE__, __LINE__, __func__); \
 		if (__builtin_constant_p(elevel) && (elevel) >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
@@ -148,7 +150,7 @@
 		const int elevel_ = (elevel); \
 		pg_prevent_errno_in_scope(); \
 		if (errstart(elevel_, domain)) \
-			__VA_ARGS__, errfinish(__FILE__, __LINE__, PG_FUNCNAME_MACRO); \
+			__VA_ARGS__, errfinish(__FILE__, __LINE__, __func__); \
 		if (elevel_ >= ERROR) \
 			pg_unreachable(); \
 	} while(0)
@@ -424,23 +426,39 @@ typedef enum
 	PGERROR_VERBOSE				/* all the facts, ma'am */
 }			PGErrorVerbosity;
 
-extern int	Log_error_verbosity;
-extern char *Log_line_prefix;
-extern int	Log_destination;
-extern char *Log_destination_string;
-extern bool syslog_sequence_numbers;
-extern bool syslog_split_messages;
+extern PGDLLIMPORT int Log_error_verbosity;
+extern PGDLLIMPORT char *Log_line_prefix;
+extern PGDLLIMPORT int Log_destination;
+extern PGDLLIMPORT char *Log_destination_string;
+extern PGDLLIMPORT bool syslog_sequence_numbers;
+extern PGDLLIMPORT bool syslog_split_messages;
 
 /* Log destination bitmap */
 #define LOG_DESTINATION_STDERR	 1
 #define LOG_DESTINATION_SYSLOG	 2
 #define LOG_DESTINATION_EVENTLOG 4
 #define LOG_DESTINATION_CSVLOG	 8
+#define LOG_DESTINATION_JSONLOG	16
 
 /* Other exported functions */
+extern void log_status_format(StringInfo buf, const char *format,
+							  ErrorData *edata);
 extern void DebugFileOpen(void);
 extern char *unpack_sql_state(int sql_state);
 extern bool in_error_recursion_trouble(void);
+
+/* Common functions shared across destinations */
+extern void reset_formatted_start_time(void);
+extern char *get_formatted_start_time(void);
+extern char *get_formatted_log_time(void);
+extern const char *get_backend_type_for_log(void);
+extern bool check_log_of_query(ErrorData *edata);
+extern const char *error_severity(int elevel);
+extern void write_pipe_chunks(char *data, int len, int dest);
+
+/* Destination-specific functions */
+extern void write_csvlog(ErrorData *edata);
+extern void write_jsonlog(ErrorData *edata);
 
 #ifdef HAVE_SYSLOG
 extern void set_syslog_parameters(const char *ident, int facility);

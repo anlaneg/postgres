@@ -6,7 +6,7 @@
  *
  * This code is released under the terms of the PostgreSQL License.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/test/regress/regress.c
@@ -41,6 +41,7 @@
 #include "storage/spin.h"
 #include "utils/builtins.h"
 #include "utils/geo_decls.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
 #include "utils/typcache.h"
@@ -529,6 +530,16 @@ int44out(PG_FUNCTION_ARGS)
 			 an_array[3]);
 
 	PG_RETURN_CSTRING(result);
+}
+
+PG_FUNCTION_INFO_V1(test_canonicalize_path);
+Datum
+test_canonicalize_path(PG_FUNCTION_ARGS)
+{
+	char	   *path = text_to_cstring(PG_GETARG_TEXT_PP(0));
+
+	canonicalize_path(path);
+	PG_RETURN_TEXT_P(cstring_to_text(path));
 }
 
 PG_FUNCTION_INFO_V1(make_tuple_indirect);
@@ -1099,7 +1110,7 @@ test_enc_conversion(PG_FUNCTION_ARGS)
 	int			convertedbytes;
 	int			dstlen;
 	Datum		values[2];
-	bool		nulls[2];
+	bool		nulls[2] = {0};
 	HeapTuple	tuple;
 
 	if (src_encoding < 0)
@@ -1188,7 +1199,6 @@ test_enc_conversion(PG_FUNCTION_ARGS)
 		pfree(dst);
 	}
 
-	MemSet(nulls, 0, sizeof(nulls));
 	values[0] = Int32GetDatum(convertedbytes);
 	values[1] = PointerGetDatum(retval);
 	tuple = heap_form_tuple(tupdesc, values, nulls);
@@ -1205,4 +1215,44 @@ binary_coercible(PG_FUNCTION_ARGS)
 	Oid			targettype = PG_GETARG_OID(1);
 
 	PG_RETURN_BOOL(IsBinaryCoercible(srctype, targettype));
+}
+
+/*
+ * Return the length of the portion of a tuple consisting of the given array
+ * of data types.  The input data types must be fixed-length data types.
+ */
+PG_FUNCTION_INFO_V1(get_columns_length);
+Datum
+get_columns_length(PG_FUNCTION_ARGS)
+{
+	ArrayType  *ta = PG_GETARG_ARRAYTYPE_P(0);
+	Oid		   *type_oids;
+	int			ntypes;
+	int			column_offset = 0;
+
+	if (ARR_HASNULL(ta) && array_contains_nulls(ta))
+		elog(ERROR, "argument must not contain nulls");
+
+	if (ARR_NDIM(ta) > 1)
+		elog(ERROR, "argument must be empty or one-dimensional array");
+
+	type_oids = (Oid *) ARR_DATA_PTR(ta);
+	ntypes = ArrayGetNItems(ARR_NDIM(ta), ARR_DIMS(ta));
+	for (int i = 0; i < ntypes; i++)
+	{
+		Oid			typeoid = type_oids[i];
+		int16		typlen;
+		bool		typbyval;
+		char		typalign;
+
+		get_typlenbyvalalign(typeoid, &typlen, &typbyval, &typalign);
+
+		/* the data type must be fixed-length */
+		if (typlen < 0)
+			elog(ERROR, "type %u is not fixed-length data type", typeoid);
+
+		column_offset = att_align_nominal(column_offset + typlen, typalign);
+	}
+
+	PG_RETURN_INT32(column_offset);
 }

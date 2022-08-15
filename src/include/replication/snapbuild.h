@@ -3,7 +3,7 @@
  * snapbuild.h
  *	  Exports from replication/logical/snapbuild.c.
  *
- * Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Copyright (c) 2012-2022, PostgreSQL Global Development Group
  *
  * src/include/replication/snapbuild.h
  *
@@ -82,7 +82,7 @@ extern void SnapBuildSetTwoPhaseAt(SnapBuild *builder, XLogRecPtr ptr);
 
 extern void SnapBuildCommitTxn(SnapBuild *builder, XLogRecPtr lsn,
 							   TransactionId xid, int nsubxacts,
-							   TransactionId *subxacts);
+							   TransactionId *subxacts, uint32 xinfo);
 extern bool SnapBuildProcessChange(SnapBuild *builder, TransactionId xid,
 								   XLogRecPtr lsn);
 extern void SnapBuildProcessNewCid(SnapBuild *builder, TransactionId xid,

@@ -8,7 +8,7 @@
  *	  Structs that need to be client-visible are in pqcomm.h.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/libpq/libpq-be.h
@@ -33,14 +33,6 @@
 #else
 #include <gssapi/gssapi.h>
 #endif							/* HAVE_GSSAPI_H */
-/*
- * GSSAPI brings in headers that set a lot of things in the global namespace on win32,
- * that doesn't match the msvc build. It gives a bunch of compiler warnings that we ignore,
- * but also defines a symbol that simply does not exist. Undefine it again.
- */
-#ifdef _MSC_VER
-#undef HAVE_GETADDRINFO
-#endif
 #endif							/* ENABLE_GSS */
 
 #ifdef ENABLE_SSPI
@@ -75,8 +67,7 @@ typedef enum CAC_state
 	CAC_SHUTDOWN,
 	CAC_RECOVERY,
 	CAC_NOTCONSISTENT,
-	CAC_TOOMANY,
-	CAC_SUPERUSER
+	CAC_TOOMANY
 } CAC_state;
 
 
@@ -327,7 +318,7 @@ extern ssize_t be_gssapi_read(Port *port, void *ptr, size_t len);
 extern ssize_t be_gssapi_write(Port *port, void *ptr, size_t len);
 #endif							/* ENABLE_GSS */
 
-extern ProtocolVersion FrontendProtocol;
+extern PGDLLIMPORT ProtocolVersion FrontendProtocol;
 
 /* TCP keepalives configuration. These are no-ops on an AF_UNIX socket. */
 

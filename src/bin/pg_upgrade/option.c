@@ -3,13 +3,12 @@
  *
  *	options functions
  *
- *	Copyright (c) 2010-2021, PostgreSQL Global Development Group
+ *	Copyright (c) 2010-2022, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/option.c
  */
 
 #include "postgres_fe.h"
 
-#include <time.h>
 #ifdef WIN32
 #include <io.h>
 #endif
@@ -43,6 +42,7 @@ parseCommandLine(int argc, char *argv[])
 		{"new-datadir", required_argument, NULL, 'D'},
 		{"old-bindir", required_argument, NULL, 'b'},
 		{"new-bindir", required_argument, NULL, 'B'},
+		{"no-sync", no_argument, NULL, 'N'},
 		{"old-options", required_argument, NULL, 'o'},
 		{"new-options", required_argument, NULL, 'O'},
 		{"old-port", required_argument, NULL, 'p'},
@@ -62,10 +62,8 @@ parseCommandLine(int argc, char *argv[])
 	int			option;			/* Command line option */
 	int			optindex = 0;	/* used by getopt_long */
 	int			os_user_effective_id;
-	FILE	   *fp;
-	char	  **filename;
-	time_t		run_time = time(NULL);
 
+	user_opts.do_sync = true;
 	user_opts.transfer_mode = TRANSFER_MODE_COPY;
 
 	os_info.progname = get_progname(argv[0]);
@@ -99,9 +97,9 @@ parseCommandLine(int argc, char *argv[])
 
 	/* Allow help and version to be run as root, so do the test here. */
 	if (os_user_effective_id == 0)
-		pg_fatal("%s: cannot be run as root\n", os_info.progname);
+		pg_fatal("%s: cannot be run as root", os_info.progname);
 
-	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:ko:O:p:P:rs:U:v",
+	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:kNo:O:p:P:rs:U:v",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -134,6 +132,10 @@ parseCommandLine(int argc, char *argv[])
 				user_opts.transfer_mode = TRANSFER_MODE_LINK;
 				break;
 
+			case 'N':
+				user_opts.do_sync = false;
+				break;
+
 			case 'o':
 				/* append option? */
 				if (!old_cluster.pgopts)
@@ -160,19 +162,14 @@ parseCommandLine(int argc, char *argv[])
 				}
 				break;
 
-				/*
-				 * Someday, the port number option could be removed and passed
-				 * using -o/-O, but that requires postmaster -C to be
-				 * supported on all old/new versions (added in PG 9.2).
-				 */
 			case 'p':
 				if ((old_cluster.port = atoi(optarg)) <= 0)
-					pg_fatal("invalid old port number\n");
+					pg_fatal("invalid old port number");
 				break;
 
 			case 'P':
 				if ((new_cluster.port = atoi(optarg)) <= 0)
-					pg_fatal("invalid new port number\n");
+					pg_fatal("invalid new port number");
 				break;
 
 			case 'r':
@@ -187,12 +184,6 @@ parseCommandLine(int argc, char *argv[])
 				pg_free(os_info.user);
 				os_info.user = pg_strdup(optarg);
 				os_info.user_specified = true;
-
-				/*
-				 * Push the user name into the environment so pre-9.1
-				 * pg_ctl/libpq uses it.
-				 */
-				setenv("PGUSER", os_info.user, 1);
 				break;
 
 			case 'v':
@@ -211,28 +202,12 @@ parseCommandLine(int argc, char *argv[])
 	}
 
 	if (optind < argc)
-		pg_fatal("too many command-line arguments (first is \"%s\")\n", argv[optind]);
-
-	if ((log_opts.internal = fopen_priv(INTERNAL_LOG_FILE, "a")) == NULL)
-		pg_fatal("could not open log file \"%s\": %m\n", INTERNAL_LOG_FILE);
+		pg_fatal("too many command-line arguments (first is \"%s\")", argv[optind]);
 
 	if (log_opts.verbose)
-		pg_log(PG_REPORT, "Running in verbose mode\n");
+		pg_log(PG_REPORT, "Running in verbose mode");
 
-	/* label start of upgrade in logfiles */
-	for (filename = output_files; *filename != NULL; filename++)
-	{
-		if ((fp = fopen_priv(*filename, "a")) == NULL)
-			pg_fatal("could not write to log file \"%s\": %m\n", *filename);
-
-		/* Start with newline because we might be appending to a file. */
-		fprintf(fp, "\n"
-				"-----------------------------------------------------------------\n"
-				"  pg_upgrade run on %s"
-				"-----------------------------------------------------------------\n\n",
-				ctime(&run_time));
-		fclose(fp);
-	}
+	log_opts.isatty = isatty(fileno(stdout));
 
 	/* Turn off read-only mode;  add prefix to PGOPTIONS? */
 	if (getenv("PGOPTIONS"))
@@ -273,10 +248,10 @@ parseCommandLine(int argc, char *argv[])
 		canonicalize_path(new_cluster_pgdata);
 
 		if (!getcwd(cwd, MAXPGPATH))
-			pg_fatal("could not determine current directory\n");
+			pg_fatal("could not determine current directory");
 		canonicalize_path(cwd);
 		if (path_is_prefix_of_path(new_cluster_pgdata, cwd))
-			pg_fatal("cannot run pg_upgrade from inside the new cluster data directory on Windows\n");
+			pg_fatal("cannot run pg_upgrade from inside the new cluster data directory on Windows");
 	}
 #endif
 }
@@ -297,6 +272,7 @@ usage(void)
 	printf(_("  -D, --new-datadir=DATADIR     new cluster data directory\n"));
 	printf(_("  -j, --jobs=NUM                number of simultaneous processes or threads to use\n"));
 	printf(_("  -k, --link                    link instead of copying files to new cluster\n"));
+	printf(_("  -N, --no-sync                 do not wait for changes to be written safely to disk\n"));
 	printf(_("  -o, --old-options=OPTIONS     old cluster options to pass to the server\n"));
 	printf(_("  -O, --new-options=OPTIONS     new cluster options to pass to the server\n"));
 	printf(_("  -p, --old-port=PORT           old cluster port number (default %d)\n"), old_cluster.port);
@@ -371,14 +347,14 @@ check_required_directory(char **dirpath, const char *envVarName, bool useCwd,
 			char		cwd[MAXPGPATH];
 
 			if (!getcwd(cwd, MAXPGPATH))
-				pg_fatal("could not determine current directory\n");
+				pg_fatal("could not determine current directory");
 			*dirpath = pg_strdup(cwd);
 		}
 		else if (missingOk)
 			return;
 		else
 			pg_fatal("You must identify the directory where the %s.\n"
-					 "Please use the %s command-line option or the %s environment variable.\n",
+					 "Please use the %s command-line option or the %s environment variable.",
 					 description, cmdLineOption, envVarName);
 	}
 
@@ -443,7 +419,7 @@ adjust_data_dir(ClusterInfo *cluster)
 
 	if ((output = popen(cmd, "r")) == NULL ||
 		fgets(cmd_output, sizeof(cmd_output), output) == NULL)
-		pg_fatal("could not get data directory using %s: %s\n",
+		pg_fatal("could not get data directory using %s: %s",
 				 cmd, strerror(errno));
 
 	pclose(output);
@@ -468,69 +444,53 @@ adjust_data_dir(ClusterInfo *cluster)
 void
 get_sock_dir(ClusterInfo *cluster, bool live_check)
 {
-#if defined(HAVE_UNIX_SOCKETS) && !defined(WIN32)
-
-	/*
-	 * sockdir and port were added to postmaster.pid in PG 9.1. Pre-9.1 cannot
-	 * process pg_ctl -w for sockets in non-default locations.
-	 */
-	if (GET_MAJOR_VERSION(cluster->major_version) >= 901)
-	{
-		if (!live_check)
-			cluster->sockdir = user_opts.socketdir;
-		else
-		{
-			/*
-			 * If we are doing a live check, we will use the old cluster's
-			 * Unix domain socket directory so we can connect to the live
-			 * server.
-			 */
-			unsigned short orig_port = cluster->port;
-			char		filename[MAXPGPATH],
-						line[MAXPGPATH];
-			FILE	   *fp;
-			int			lineno;
-
-			snprintf(filename, sizeof(filename), "%s/postmaster.pid",
-					 cluster->pgdata);
-			if ((fp = fopen(filename, "r")) == NULL)
-				pg_fatal("could not open file \"%s\": %s\n",
-						 filename, strerror(errno));
-
-			for (lineno = 1;
-				 lineno <= Max(LOCK_FILE_LINE_PORT, LOCK_FILE_LINE_SOCKET_DIR);
-				 lineno++)
-			{
-				if (fgets(line, sizeof(line), fp) == NULL)
-					pg_fatal("could not read line %d from file \"%s\": %s\n",
-							 lineno, filename, strerror(errno));
-
-				/* potentially overwrite user-supplied value */
-				if (lineno == LOCK_FILE_LINE_PORT)
-					sscanf(line, "%hu", &old_cluster.port);
-				if (lineno == LOCK_FILE_LINE_SOCKET_DIR)
-				{
-					/* strip trailing newline and carriage return */
-					cluster->sockdir = pg_strdup(line);
-					(void) pg_strip_crlf(cluster->sockdir);
-				}
-			}
-			fclose(fp);
-
-			/* warn of port number correction */
-			if (orig_port != DEF_PGUPORT && old_cluster.port != orig_port)
-				pg_log(PG_WARNING, "user-supplied old port number %hu corrected to %hu\n",
-					   orig_port, cluster->port);
-		}
-	}
+#if !defined(WIN32)
+	if (!live_check)
+		cluster->sockdir = user_opts.socketdir;
 	else
-
+	{
 		/*
-		 * Can't get sockdir and pg_ctl -w can't use a non-default, use
-		 * default
+		 * If we are doing a live check, we will use the old cluster's Unix
+		 * domain socket directory so we can connect to the live server.
 		 */
-		cluster->sockdir = NULL;
-#else							/* !HAVE_UNIX_SOCKETS || WIN32 */
+		unsigned short orig_port = cluster->port;
+		char		filename[MAXPGPATH],
+					line[MAXPGPATH];
+		FILE	   *fp;
+		int			lineno;
+
+		snprintf(filename, sizeof(filename), "%s/postmaster.pid",
+				 cluster->pgdata);
+		if ((fp = fopen(filename, "r")) == NULL)
+			pg_fatal("could not open file \"%s\": %s",
+					 filename, strerror(errno));
+
+		for (lineno = 1;
+			 lineno <= Max(LOCK_FILE_LINE_PORT, LOCK_FILE_LINE_SOCKET_DIR);
+			 lineno++)
+		{
+			if (fgets(line, sizeof(line), fp) == NULL)
+				pg_fatal("could not read line %d from file \"%s\": %s",
+						 lineno, filename, strerror(errno));
+
+			/* potentially overwrite user-supplied value */
+			if (lineno == LOCK_FILE_LINE_PORT)
+				sscanf(line, "%hu", &old_cluster.port);
+			if (lineno == LOCK_FILE_LINE_SOCKET_DIR)
+			{
+				/* strip trailing newline and carriage return */
+				cluster->sockdir = pg_strdup(line);
+				(void) pg_strip_crlf(cluster->sockdir);
+			}
+		}
+		fclose(fp);
+
+		/* warn of port number correction */
+		if (orig_port != DEF_PGUPORT && old_cluster.port != orig_port)
+			pg_log(PG_WARNING, "user-supplied old port number %hu corrected to %hu",
+				   orig_port, cluster->port);
+	}
+#else							/* WIN32 */
 	cluster->sockdir = NULL;
 #endif
 }

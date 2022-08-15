@@ -10,7 +10,7 @@
  * only here to simplify syncing this file with scan.l.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -99,9 +99,9 @@ static short preproc_tos;
 static bool ifcond;
 static struct _if_value
 {
-	bool active;
-	bool saw_active;
-	bool else_branch;
+	bool		active;
+	bool		saw_active;
+	bool		else_branch;
 } stacked_if_value[MAX_NESTED_IF];
 
 %}
@@ -353,7 +353,7 @@ operator		{op_chars}+
  *
  * {decimalfail} is used because we would like "1..10" to lex as 1, dot_dot, 10.
  *
- * {realfail1} and {realfail2} are added to prevent the need for scanner
+ * {realfail} is added to prevent the need for scanner
  * backup when the {real} rule fails to match completely.
  */
 digit			[0-9]
@@ -362,10 +362,14 @@ integer			{digit}+
 decimal			(({digit}*\.{digit}+)|({digit}+\.{digit}*))
 decimalfail		{digit}+\.\.
 real			({integer}|{decimal})[Ee][-+]?{digit}+
-realfail1		({integer}|{decimal})[Ee]
-realfail2		({integer}|{decimal})[Ee][-+]
+realfail		({integer}|{decimal})[Ee][-+]
+
+integer_junk	{integer}{ident_start}
+decimal_junk	{decimal}{ident_start}
+real_junk		{real}{ident_start}
 
 param			\${integer}
+param_junk		\${integer}{ident_start}
 
 /* special characters for other dbms */
 /* we have to react differently in compat mode */
@@ -737,7 +741,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 				}
 <xui>{dquote}	{
 					BEGIN(state_before_str_start);
-					if (literallen == 2) /* "U&" */
+					if (literallen == 0)
 						mmerror(PARSE_ERROR, ET_ERROR, "zero-length delimited identifier");
 					/* The backend will truncate the identifier here. We do not as it does not change the result. */
 					base_yylval.str = psprintf("U&\"%s\"", literalbuf);
@@ -917,6 +921,9 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					base_yylval.ival = atol(yytext+1);
 					return PARAM;
 				}
+{param_junk}	{
+					mmfatal(PARSE_ERROR, "trailing junk after parameter");
+				}
 
 {ip}			{
 					base_yylval.str = mm_strdup(yytext);
@@ -941,22 +948,31 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					base_yylval.str = mm_strdup(yytext);
 					return FCONST;
 				}
-{realfail1}		{
+{realfail}		{
 					/*
-					 * throw back the [Ee], and figure out whether what
+					 * throw back the [Ee][+-], and figure out whether what
 					 * remains is an {integer} or {decimal}.
 					 */
-					yyless(yyleng - 1);
-					return process_integer_literal(yytext, &base_yylval);
-				}
-{realfail2}		{
-					/* throw back the [Ee][+-], and proceed as above */
 					yyless(yyleng - 2);
 					return process_integer_literal(yytext, &base_yylval);
 				}
 } /* <C,SQL> */
 
 <SQL>{
+	/*
+	 * Note that some trailing junk is valid in C (such as 100LL), so we
+	 * contain this to SQL mode.
+	 */
+{integer_junk}	{
+					mmfatal(PARSE_ERROR, "trailing junk after numeric literal");
+				}
+{decimal_junk}	{
+					mmfatal(PARSE_ERROR, "trailing junk after numeric literal");
+				}
+{real_junk}		{
+					mmfatal(PARSE_ERROR, "trailing junk after numeric literal");
+				}
+
 :{identifier}((("->"|\.){identifier})|(\[{array}\]))*	{
 					base_yylval.str = mm_strdup(yytext+1);
 					return CVARIABLE;
@@ -967,10 +983,19 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					{
 						int		kwvalue;
 
-						/* Is it an SQL/ECPG keyword? */
-						kwvalue = ScanECPGKeywordLookup(yytext);
-						if (kwvalue >= 0)
-							return kwvalue;
+						/*
+						 * User-defined typedefs override SQL keywords, but
+						 * not C keywords.  Currently, a typedef name is just
+						 * reported as IDENT, but someday we might need to
+						 * return a distinct token type.
+						 */
+						if (get_typedef(yytext, true) == NULL)
+						{
+							/* Is it an SQL/ECPG keyword? */
+							kwvalue = ScanECPGKeywordLookup(yytext);
+							if (kwvalue >= 0)
+								return kwvalue;
+						}
 
 						/* Is it a C keyword? */
 						kwvalue = ScanCKeywordLookup(yytext);
@@ -1015,7 +1040,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 						char* endptr;
 
 						errno = 0;
-						base_yylval.ival = strtoul((char *)yytext,&endptr,16);
+						base_yylval.ival = strtoul((char *) yytext, &endptr, 16);
 						if (*endptr != '\0' || errno == ERANGE)
 						{
 							errno = 0;
@@ -1150,7 +1175,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					 */
 					for (i = strlen(yytext)-2;
 						 i > 0 && ecpg_isspace(yytext[i]);
-						 i-- )
+						 i--)
 						;
 					yytext[i+1] = '\0';
 
@@ -1274,7 +1299,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 				}
 
 <C,xskip>{exec_sql}{else}{space}*";" {	/* only exec sql endif pops the stack, so take care of duplicated 'else' */
-					if ( preproc_tos == 0 )
+					if (preproc_tos == 0)
 						mmfatal(PARSE_ERROR, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
 					else if (stacked_if_value[preproc_tos].else_branch)
 						mmfatal(PARSE_ERROR, "more than one EXEC SQL ELSE");
@@ -1296,7 +1321,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 					/* are we simulating Informix? */
 					if (INFORMIX_MODE)
 					{
-						if ( preproc_tos == 0 )
+						if (preproc_tos == 0)
 							mmfatal(PARSE_ERROR, "missing matching \"EXEC SQL IFDEF\" / \"EXEC SQL IFNDEF\"");
 						else if (stacked_if_value[preproc_tos].else_branch)
 							mmfatal(PARSE_ERROR, "more than one EXEC SQL ELSE");
@@ -1366,7 +1391,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 						 */
 						for (i = strlen(yytext)-2;
 							 i > 0 && ecpg_isspace(yytext[i]);
-							 i-- )
+							 i--)
 							;
 						yytext[i+1] = '\0';
 
@@ -1440,7 +1465,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 <<EOF>>				{
 					if (yy_buffer == NULL)
 					{
-						if ( preproc_tos > 0 )
+						if (preproc_tos > 0)
 						{
 							preproc_tos = 0;
 							mmfatal(PARSE_ERROR, "missing \"EXEC SQL ENDIF;\"");
@@ -1463,7 +1488,7 @@ cppline			{space}*#([^i][A-Za-z]*|{if}|{ifdef}|{ifndef}|{import})((\/\*[^*/]*\*+
 						if (yyin != NULL)
 							fclose(yyin);
 
-						yy_delete_buffer( YY_CURRENT_BUFFER );
+						yy_delete_buffer(YY_CURRENT_BUFFER);
 						yy_switch_to_buffer(yy_buffer->buffer);
 
 						yylineno = yy_buffer->lineno;
@@ -1645,7 +1670,7 @@ parse_include(void)
 				if (strcmp(inc_file + strlen(inc_file) - 2, ".h") != 0)
 				{
 					strcat(inc_file, ".h");
-					yyin = fopen( inc_file, "r" );
+					yyin = fopen(inc_file, "r");
 				}
 			}
 			/* if the command was "include_next" we have to disregard the first hit */
@@ -1661,7 +1686,7 @@ parse_include(void)
 		mmfatal(NO_INCLUDE_FILE, "could not open include file \"%s\" on line %d", yytext, yylineno);
 
 	input_filename = mm_strdup(inc_file);
-	yy_switch_to_buffer(yy_create_buffer(yyin,YY_BUF_SIZE ));
+	yy_switch_to_buffer(yy_create_buffer(yyin,YY_BUF_SIZE));
 	yylineno = 1;
 	output_line_number();
 

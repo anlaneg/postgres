@@ -3,7 +3,7 @@
  * postgres_fdw.c
  *		  Foreign-data wrapper for remote PostgreSQL servers
  *
- * Portions Copyright (c) 2012-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2012-2022, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *		  contrib/postgres_fdw/postgres_fdw.c
@@ -18,6 +18,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_class.h"
+#include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
 #include "commands/explain.h"
 #include "commands/vacuum.h"
@@ -103,7 +104,7 @@ enum FdwModifyPrivateIndex
 	FdwModifyPrivateTargetAttnums,
 	/* Length till the end of VALUES clause (as an Integer node) */
 	FdwModifyPrivateLen,
-	/* has-returning flag (as an Integer node) */
+	/* has-returning flag (as a Boolean node) */
 	FdwModifyPrivateHasReturning,
 	/* Integer list of attribute numbers retrieved by RETURNING */
 	FdwModifyPrivateRetrievedAttrs
@@ -122,11 +123,11 @@ enum FdwDirectModifyPrivateIndex
 {
 	/* SQL statement to execute remotely (as a String node) */
 	FdwDirectModifyPrivateUpdateSql,
-	/* has-returning flag (as an Integer node) */
+	/* has-returning flag (as a Boolean node) */
 	FdwDirectModifyPrivateHasReturning,
 	/* Integer list of attribute numbers retrieved by RETURNING */
 	FdwDirectModifyPrivateRetrievedAttrs,
-	/* set-processed flag (as an Integer node) */
+	/* set-processed flag (as a Boolean node) */
 	FdwDirectModifyPrivateSetProcessed
 };
 
@@ -280,9 +281,9 @@ typedef struct PgFdwAnalyzeState
  */
 enum FdwPathPrivateIndex
 {
-	/* has-final-sort flag (as an Integer node) */
+	/* has-final-sort flag (as a Boolean node) */
 	FdwPathPrivateHasFinalSort,
-	/* has-limit flag (as an Integer node) */
+	/* has-limit flag (as a Boolean node) */
 	FdwPathPrivateHasLimit
 };
 
@@ -918,8 +919,6 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel)
 		foreach(lc, root->query_pathkeys)
 		{
 			PathKey    *pathkey = (PathKey *) lfirst(lc);
-			EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
-			Expr	   *em_expr;
 
 			/*
 			 * The planner and executor don't have any clever strategy for
@@ -927,13 +926,8 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel)
 			 * getting it to be sorted by all of those pathkeys. We'll just
 			 * end up resorting the entire data set.  So, unless we can push
 			 * down all of the query pathkeys, forget it.
-			 *
-			 * is_foreign_expr would detect volatile expressions as well, but
-			 * checking ec_has_volatile here saves some cycles.
 			 */
-			if (pathkey_ec->ec_has_volatile ||
-				!(em_expr = find_em_expr_for_rel(pathkey_ec, rel)) ||
-				!is_foreign_expr(root, rel, em_expr))
+			if (!is_foreign_pathkey(root, rel, pathkey))
 			{
 				query_pathkeys_ok = false;
 				break;
@@ -980,16 +974,19 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel)
 	foreach(lc, useful_eclass_list)
 	{
 		EquivalenceClass *cur_ec = lfirst(lc);
-		Expr	   *em_expr;
 		PathKey    *pathkey;
 
 		/* If redundant with what we did above, skip it. */
 		if (cur_ec == query_ec)
 			continue;
 
+		/* Can't push down the sort if the EC's opfamily is not shippable. */
+		if (!is_shippable(linitial_oid(cur_ec->ec_opfamilies),
+						  OperatorFamilyRelationId, fpinfo))
+			continue;
+
 		/* If no pushable expression for this rel, skip it. */
-		em_expr = find_em_expr_for_rel(cur_ec, rel);
-		if (em_expr == NULL || !is_foreign_expr(root, rel, em_expr))
+		if (find_em_for_rel(root, cur_ec, rel) == NULL)
 			continue;
 
 		/* Looks like we can generate a pathkey, so let's do it. */
@@ -1245,10 +1242,10 @@ postgresGetForeignPlan(PlannerInfo *root,
 	 */
 	if (best_path->fdw_private)
 	{
-		has_final_sort = intVal(list_nth(best_path->fdw_private,
-										 FdwPathPrivateHasFinalSort));
-		has_limit = intVal(list_nth(best_path->fdw_private,
-									FdwPathPrivateHasLimit));
+		has_final_sort = boolVal(list_nth(best_path->fdw_private,
+										  FdwPathPrivateHasFinalSort));
+		has_limit = boolVal(list_nth(best_path->fdw_private,
+									 FdwPathPrivateHasLimit));
 	}
 
 	if (IS_SIMPLE_REL(foreignrel))
@@ -1652,6 +1649,18 @@ postgresReScanForeignScan(ForeignScanState *node)
 		return;
 
 	/*
+	 * If the node is async-capable, and an asynchronous fetch for it has been
+	 * begun, the asynchronous fetch might not have yet completed.  Check if
+	 * the node is async-capable, and an asynchronous fetch for it is still in
+	 * progress; if so, complete the asynchronous fetch before restarting the
+	 * scan.
+	 */
+	if (fsstate->async_capable &&
+		fsstate->conn_state->pendingAreq &&
+		fsstate->conn_state->pendingAreq->requestee == (PlanState *) node)
+		fetch_more_data(node);
+
+	/*
 	 * If any internal parameters affecting this node have changed, we'd
 	 * better destroy and recreate the cursor.  Otherwise, rewinding it should
 	 * be good enough.  If we've only fetched zero or one batch, we needn't
@@ -1879,7 +1888,7 @@ postgresPlanForeignModify(PlannerInfo *root,
 	return list_make5(makeString(sql.data),
 					  targetAttrs,
 					  makeInteger(values_end_len),
-					  makeInteger((retrieved_attrs != NIL)),
+					  makeBoolean((retrieved_attrs != NIL)),
 					  retrieved_attrs);
 }
 
@@ -1916,8 +1925,8 @@ postgresBeginForeignModify(ModifyTableState *mtstate,
 									 FdwModifyPrivateTargetAttnums);
 	values_end_len = intVal(list_nth(fdw_private,
 									 FdwModifyPrivateLen));
-	has_returning = intVal(list_nth(fdw_private,
-									FdwModifyPrivateHasReturning));
+	has_returning = boolVal(list_nth(fdw_private,
+									 FdwModifyPrivateHasReturning));
 	retrieved_attrs = (List *) list_nth(fdw_private,
 										FdwModifyPrivateRetrievedAttrs);
 
@@ -2003,8 +2012,8 @@ postgresExecForeignBatchInsert(EState *estate,
  *		Determine the maximum number of tuples that can be inserted in bulk
  *
  * Returns the batch size specified for server or table. When batching is not
- * allowed (e.g. for tables with AFTER ROW triggers or with RETURNING clause),
- * returns 1.
+ * allowed (e.g. for tables with BEFORE/AFTER ROW triggers or with RETURNING
+ * clause), returns 1.
  */
 static int
 postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
@@ -2033,10 +2042,21 @@ postgresGetForeignModifyBatchSize(ResultRelInfo *resultRelInfo)
 	else
 		batch_size = get_batch_size_option(resultRelInfo->ri_RelationDesc);
 
-	/* Disable batching when we have to use RETURNING. */
+	/*
+	 * Disable batching when we have to use RETURNING, there are any
+	 * BEFORE/AFTER ROW INSERT triggers on the foreign table, or there are any
+	 * WITH CHECK OPTION constraints from parent views.
+	 *
+	 * When there are any BEFORE ROW INSERT triggers on the table, we can't
+	 * support it, because such triggers might query the table we're inserting
+	 * into and act differently if the tuples that have already been processed
+	 * and prepared for insertion are not there.
+	 */
 	if (resultRelInfo->ri_projectReturning != NULL ||
+		resultRelInfo->ri_WithCheckOptions != NIL ||
 		(resultRelInfo->ri_TrigDesc &&
-		 resultRelInfo->ri_TrigDesc->trig_insert_after_row))
+		 (resultRelInfo->ri_TrigDesc->trig_insert_before_row ||
+		  resultRelInfo->ri_TrigDesc->trig_insert_after_row)))
 		return 1;
 
 	/*
@@ -2567,9 +2587,9 @@ postgresPlanDirectModify(PlannerInfo *root,
 	 * Items in the list must match enum FdwDirectModifyPrivateIndex, above.
 	 */
 	fscan->fdw_private = list_make4(makeString(sql.data),
-									makeInteger((retrieved_attrs != NIL)),
+									makeBoolean((retrieved_attrs != NIL)),
 									retrieved_attrs,
-									makeInteger(plan->canSetTag));
+									makeBoolean(plan->canSetTag));
 
 	/*
 	 * Update the foreign-join-related fields.
@@ -2667,12 +2687,12 @@ postgresBeginDirectModify(ForeignScanState *node, int eflags)
 	/* Get private info created by planner functions. */
 	dmstate->query = strVal(list_nth(fsplan->fdw_private,
 									 FdwDirectModifyPrivateUpdateSql));
-	dmstate->has_returning = intVal(list_nth(fsplan->fdw_private,
-											 FdwDirectModifyPrivateHasReturning));
+	dmstate->has_returning = boolVal(list_nth(fsplan->fdw_private,
+											  FdwDirectModifyPrivateHasReturning));
 	dmstate->retrieved_attrs = (List *) list_nth(fsplan->fdw_private,
 												 FdwDirectModifyPrivateRetrievedAttrs);
-	dmstate->set_processed = intVal(list_nth(fsplan->fdw_private,
-											 FdwDirectModifyPrivateSetProcessed));
+	dmstate->set_processed = boolVal(list_nth(fsplan->fdw_private,
+											  FdwDirectModifyPrivateSetProcessed));
 
 	/* Create context for per-tuple temp workspace. */
 	dmstate->temp_cxt = AllocSetContextCreate(estate->es_query_cxt,
@@ -2772,8 +2792,7 @@ postgresEndDirectModify(ForeignScanState *node)
 		return;
 
 	/* Release PGresult */
-	if (dmstate->result)
-		PQclear(dmstate->result);
+	PQclear(dmstate->result);
 
 	/* Release remote connection */
 	ReleaseConnection(dmstate->conn);
@@ -3586,8 +3605,7 @@ get_remote_estimate(const char *sql, PGconn *conn,
 	}
 	PG_FINALLY();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 	}
 	PG_END_TRY();
 }
@@ -3835,8 +3853,7 @@ fetch_more_data(ForeignScanState *node)
 	}
 	PG_FINALLY();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 	}
 	PG_END_TRY();
 
@@ -3880,6 +3897,14 @@ set_transmission_modes(void)
 		(void) set_config_option("extra_float_digits", "3",
 								 PGC_USERSET, PGC_S_SESSION,
 								 GUC_ACTION_SAVE, true, 0, false);
+
+	/*
+	 * In addition force restrictive search_path, in case there are any
+	 * regproc or similar constants to be printed.
+	 */
+	(void) set_config_option("search_path", "pg_catalog",
+							 PGC_USERSET, PGC_S_SESSION,
+							 GUC_ACTION_SAVE, true, 0, false);
 
 	return nestlevel;
 }
@@ -4320,8 +4345,7 @@ store_returning_result(PgFdwModifyState *fmstate,
 	}
 	PG_CATCH();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -4609,8 +4633,7 @@ get_returning_data(ForeignScanState *node)
 		}
 		PG_CATCH();
 		{
-			if (dmstate->result)
-				PQclear(dmstate->result);
+			PQclear(dmstate->result);
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -4939,8 +4962,7 @@ postgresAnalyzeForeignTable(Relation relation,
 	}
 	PG_FINALLY();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 	}
 	PG_END_TRY();
 
@@ -5096,8 +5118,7 @@ postgresAcquireSampleRowsFunc(Relation relation, int elevel,
 	}
 	PG_CATCH();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -5478,8 +5499,7 @@ postgresImportForeignSchema(ImportForeignSchemaStmt *stmt, Oid serverOid)
 	}
 	PG_FINALLY();
 	{
-		if (res)
-			PQclear(res);
+		PQclear(res);
 	}
 	PG_END_TRY();
 
@@ -6531,7 +6551,6 @@ add_foreign_ordered_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	{
 		PathKey    *pathkey = (PathKey *) lfirst(lc);
 		EquivalenceClass *pathkey_ec = pathkey->pk_eclass;
-		Expr	   *sort_expr;
 
 		/*
 		 * is_foreign_expr would detect volatile expressions as well, but
@@ -6540,13 +6559,20 @@ add_foreign_ordered_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (pathkey_ec->ec_has_volatile)
 			return;
 
-		/* Get the sort expression for the pathkey_ec */
-		sort_expr = find_em_expr_for_input_target(root,
-												  pathkey_ec,
-												  input_rel->reltarget);
+		/*
+		 * Can't push down the sort if pathkey's opfamily is not shippable.
+		 */
+		if (!is_shippable(pathkey->pk_opfamily, OperatorFamilyRelationId,
+						  fpinfo))
+			return;
 
-		/* If it's unsafe to remote, we cannot push down the final sort */
-		if (!is_foreign_expr(root, input_rel, sort_expr))
+		/*
+		 * The EC must contain a shippable EM that is computed in input_rel's
+		 * reltarget, else we can't push down the sort.
+		 */
+		if (find_em_for_rel_target(root,
+								   pathkey_ec,
+								   input_rel) == NULL)
 			return;
 	}
 
@@ -6566,7 +6592,7 @@ add_foreign_ordered_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Build the fdw_private list that will be used by postgresGetForeignPlan.
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
-	fdw_private = list_make2(makeInteger(true), makeInteger(false));
+	fdw_private = list_make2(makeBoolean(true), makeBoolean(false));
 
 	/* Create foreign ordering path */
 	ordered_path = create_foreign_upper_path(root,
@@ -6797,8 +6823,8 @@ add_foreign_final_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	 * Build the fdw_private list that will be used by postgresGetForeignPlan.
 	 * Items in the list must match order in enum FdwPathPrivateIndex.
 	 */
-	fdw_private = list_make2(makeInteger(has_final_sort),
-							 makeInteger(extra->limit_needed));
+	fdw_private = list_make2(makeBoolean(has_final_sort),
+							 makeBoolean(extra->limit_needed));
 
 	/*
 	 * Create foreign final path; this gets rid of a no-longer-needed outer
@@ -6999,6 +7025,8 @@ produce_tuple_asynchronously(AsyncRequest *areq, bool fetch)
 		ExecAsyncRequestDone(areq, result);
 		return;
 	}
+
+	/* We must have run out of tuples */
 	Assert(fsstate->next_tuple >= fsstate->num_tuples);
 
 	/* Fetch some more tuples, if we've not detected EOF yet */
@@ -7044,7 +7072,7 @@ fetch_more_data_begin(AsyncRequest *areq)
 	snprintf(sql, sizeof(sql), "FETCH %d FROM c%u",
 			 fsstate->fetch_size, fsstate->cursor_number);
 
-	if (PQsendQuery(fsstate->conn, sql) < 0)
+	if (!PQsendQuery(fsstate->conn, sql))
 		pgfdw_report_error(ERROR, NULL, fsstate->conn, false, fsstate->query);
 
 	/* Remember that the request is in process */
@@ -7370,14 +7398,55 @@ conversion_error_callback(void *arg)
 }
 
 /*
- * Find an equivalence class member expression to be computed as a sort column
- * in the given target.
+ * Given an EquivalenceClass and a foreign relation, find an EC member
+ * that can be used to sort the relation remotely according to a pathkey
+ * using this EC.
+ *
+ * If there is more than one suitable candidate, return an arbitrary
+ * one of them.  If there is none, return NULL.
+ *
+ * This checks that the EC member expression uses only Vars from the given
+ * rel and is shippable.  Caller must separately verify that the pathkey's
+ * ordering operator is shippable.
  */
-Expr *
-find_em_expr_for_input_target(PlannerInfo *root,
-							  EquivalenceClass *ec,
-							  PathTarget *target)
+EquivalenceMember *
+find_em_for_rel(PlannerInfo *root, EquivalenceClass *ec, RelOptInfo *rel)
 {
+	ListCell   *lc;
+
+	foreach(lc, ec->ec_members)
+	{
+		EquivalenceMember *em = (EquivalenceMember *) lfirst(lc);
+
+		/*
+		 * Note we require !bms_is_empty, else we'd accept constant
+		 * expressions which are not suitable for the purpose.
+		 */
+		if (bms_is_subset(em->em_relids, rel->relids) &&
+			!bms_is_empty(em->em_relids) &&
+			is_foreign_expr(root, rel, em->em_expr))
+			return em;
+	}
+
+	return NULL;
+}
+
+/*
+ * Find an EquivalenceClass member that is to be computed as a sort column
+ * in the given rel's reltarget, and is shippable.
+ *
+ * If there is more than one suitable candidate, return an arbitrary
+ * one of them.  If there is none, return NULL.
+ *
+ * This checks that the EC member expression uses only Vars from the given
+ * rel and is shippable.  Caller must separately verify that the pathkey's
+ * ordering operator is shippable.
+ */
+EquivalenceMember *
+find_em_for_rel_target(PlannerInfo *root, EquivalenceClass *ec,
+					   RelOptInfo *rel)
+{
+	PathTarget *target = rel->reltarget;
 	ListCell   *lc1;
 	int			i;
 
@@ -7420,15 +7489,18 @@ find_em_expr_for_input_target(PlannerInfo *root,
 			while (em_expr && IsA(em_expr, RelabelType))
 				em_expr = ((RelabelType *) em_expr)->arg;
 
-			if (equal(em_expr, expr))
-				return em->em_expr;
+			if (!equal(em_expr, expr))
+				continue;
+
+			/* Check that expression (including relabels!) is shippable */
+			if (is_foreign_expr(root, rel, em->em_expr))
+				return em;
 		}
 
 		i++;
 	}
 
-	elog(ERROR, "could not find pathkey item to sort");
-	return NULL;				/* keep compiler quiet */
+	return NULL;
 }
 
 /*

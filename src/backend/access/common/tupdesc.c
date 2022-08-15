@@ -3,7 +3,7 @@
  * tupdesc.c
  *	  POSTGRES tuple descriptor support code
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -734,6 +734,15 @@ TupleDescInitBuiltinEntry(TupleDesc desc,
 			att->attlen = 8;
 			att->attbyval = FLOAT8PASSBYVAL;
 			att->attalign = TYPALIGN_DOUBLE;
+			att->attstorage = TYPSTORAGE_PLAIN;
+			att->attcompression = InvalidCompressionMethod;
+			att->attcollation = InvalidOid;
+			break;
+
+		case OIDOID:
+			att->attlen = 4;
+			att->attbyval = true;
+			att->attalign = TYPALIGN_INT;
 			att->attstorage = TYPSTORAGE_PLAIN;
 			att->attcompression = InvalidCompressionMethod;
 			att->attcollation = InvalidOid;

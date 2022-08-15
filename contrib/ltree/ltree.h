@@ -24,7 +24,7 @@
  * modified to look for -D compile flags in Makefiles, so here, in order to
  * get the historic behavior of LOWER_NODE not being defined on MSVC, we only
  * define it when not building in that environment.  This is important as we
- * want to maintain the same LOWER_NODE behavior after a pg_update.
+ * want to maintain the same LOWER_NODE behavior after a pg_upgrade.
  */
 #ifndef _MSC_VER
 #define LOWER_NODE
@@ -176,30 +176,30 @@ typedef struct
 
 
 /* use in array iterator */
-Datum		ltree_isparent(PG_FUNCTION_ARGS);
-Datum		ltree_risparent(PG_FUNCTION_ARGS);
-Datum		ltq_regex(PG_FUNCTION_ARGS);
-Datum		ltq_rregex(PG_FUNCTION_ARGS);
-Datum		lt_q_regex(PG_FUNCTION_ARGS);
-Datum		lt_q_rregex(PG_FUNCTION_ARGS);
-Datum		ltxtq_exec(PG_FUNCTION_ARGS);
-Datum		ltxtq_rexec(PG_FUNCTION_ARGS);
-Datum		_ltq_regex(PG_FUNCTION_ARGS);
-Datum		_ltq_rregex(PG_FUNCTION_ARGS);
-Datum		_lt_q_regex(PG_FUNCTION_ARGS);
-Datum		_lt_q_rregex(PG_FUNCTION_ARGS);
-Datum		_ltxtq_exec(PG_FUNCTION_ARGS);
-Datum		_ltxtq_rexec(PG_FUNCTION_ARGS);
-Datum		_ltree_isparent(PG_FUNCTION_ARGS);
-Datum		_ltree_risparent(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_isparent(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_risparent(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltq_regex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltq_rregex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum lt_q_regex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum lt_q_rregex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltxtq_exec(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltxtq_rexec(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltq_regex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltq_rregex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _lt_q_regex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _lt_q_rregex(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltxtq_exec(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltxtq_rexec(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltree_isparent(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum _ltree_risparent(PG_FUNCTION_ARGS);
 
 /* Concatenation functions */
-Datum		ltree_addltree(PG_FUNCTION_ARGS);
-Datum		ltree_addtext(PG_FUNCTION_ARGS);
-Datum		ltree_textadd(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_addltree(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_addtext(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_textadd(PG_FUNCTION_ARGS);
 
 /* Util function */
-Datum		ltree_in(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum ltree_in(PG_FUNCTION_ARGS);
 
 bool		ltree_execute(ITEM *curitem, void *checkval,
 						  bool calcnot, bool (*chkcond) (void *checkval, ITEM *val));
@@ -229,11 +229,13 @@ int			ltree_strncasecmp(const char *a, const char *b, size_t s);
 
 /* GiST support for ltree */
 
-#define SIGLEN_MAX		GISTMaxIndexKeySize
-#define SIGLEN_DEFAULT	(2 * sizeof(int32))
 #define BITBYTE 8
-#define SIGLEN	(sizeof(int32) * SIGLENINT)
 #define SIGLENBIT(siglen) ((siglen) * BITBYTE)
+#define LTREE_SIGLEN_DEFAULT	(2 * sizeof(int32))
+#define LTREE_SIGLEN_MAX		GISTMaxIndexKeySize
+#define LTREE_GET_SIGLEN()		(PG_HAS_OPCLASS_OPTIONS() ? \
+								 ((LtreeGistOptions *) PG_GET_OPCLASS_OPTIONS())->siglen : \
+								 LTREE_SIGLEN_DEFAULT)
 
 typedef unsigned char *BITVECP;
 

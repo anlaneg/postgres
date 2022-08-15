@@ -9,7 +9,7 @@
  * proper FooMain() routine for the incarnation.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -22,13 +22,12 @@
 
 #include <unistd.h>
 
-#if defined(__NetBSD__)
-#include <sys/param.h>
+#if defined(WIN32)
+#include <crtdbg.h>
 #endif
 
-#if defined(_M_AMD64) && _MSC_VER == 1800
-#include <math.h>
-#include <versionhelpers.h>
+#if defined(__NetBSD__)
+#include <sys/param.h>
 #endif
 
 #include "bootstrap/bootstrap.h"
@@ -64,7 +63,7 @@ main(int argc, char *argv[])
 	 * If supported on the current platform, set up a handler to be called if
 	 * the backend/postmaster crashes with a fatal signal or exception.
 	 */
-#if defined(WIN32) && defined(HAVE_MINIDUMP_TYPE)
+#if defined(WIN32)
 	pgwin32_install_crashdump_handler();
 #endif
 
@@ -237,25 +236,55 @@ startup_hacks(const char *progname)
 			exit(1);
 		}
 
-		/* In case of general protection fault, don't show GUI popup box */
-		SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
-
-#if defined(_M_AMD64) && _MSC_VER == 1800
-
-		/*----------
-		 * Avoid crashing in certain floating-point operations if we were
-		 * compiled for x64 with MS Visual Studio 2013 and are running on
-		 * Windows prior to 7/2008R2 SP1 on an AVX2-capable CPU.
+		/*
+		 * By default abort() only generates a crash-dump in *non* debug
+		 * builds. As our Assert() / ExceptionalCondition() uses abort(),
+		 * leaving the default in place would make debugging harder.
 		 *
-		 * Ref: https://connect.microsoft.com/VisualStudio/feedback/details/811093/visual-studio-2013-rtm-c-x64-code-generation-bug-for-avx2-instructions
-		 *----------
+		 * MINGW's own C runtime doesn't have _set_abort_behavior(). When
+		 * targeting Microsoft's UCRT with mingw, it never links to the debug
+		 * version of the library and thus doesn't need the call to
+		 * _set_abort_behavior() either.
 		 */
-		if (!IsWindows7SP1OrGreater())
-		{
-			_set_FMA3_enable(0);
-		}
-#endif							/* defined(_M_AMD64) && _MSC_VER == 1800 */
+#if !defined(__MINGW32__) && !defined(__MINGW64__)
+		_set_abort_behavior(_CALL_REPORTFAULT | _WRITE_ABORT_MSG,
+							_CALL_REPORTFAULT | _WRITE_ABORT_MSG);
+#endif							/* !defined(__MINGW32__) &&
+								 * !defined(__MINGW64__) */
 
+		/*
+		 * SEM_FAILCRITICALERRORS causes more errors to be reported to
+		 * callers.
+		 *
+		 * We used to also specify SEM_NOGPFAULTERRORBOX, but that prevents
+		 * windows crash reporting from working. Which includes registered
+		 * just-in-time debuggers, making it unnecessarily hard to debug
+		 * problems on windows. Now we try to disable sources of popups
+		 * separately below (note that SEM_NOGPFAULTERRORBOX did not actually
+		 * prevent all sources of such popups).
+		 */
+		SetErrorMode(SEM_FAILCRITICALERRORS);
+
+		/*
+		 * Show errors on stderr instead of popup box (note this doesn't
+		 * affect errors originating in the C runtime, see below).
+		 */
+		_set_error_mode(_OUT_TO_STDERR);
+
+		/*
+		 * In DEBUG builds, errors, including assertions, C runtime errors are
+		 * reported via _CrtDbgReport. By default such errors are displayed
+		 * with a popup (even with NOGPFAULTERRORBOX), preventing forward
+		 * progress. Instead report such errors stderr (and the debugger).
+		 * This is C runtime specific and thus the above incantations aren't
+		 * sufficient to suppress these popups.
+		 */
+		_CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+		_CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+		_CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+		_CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+		_CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE | _CRTDBG_MODE_DEBUG);
+		_CrtSetReportFile(_CRT_WARN, _CRTDBG_FILE_STDERR);
 	}
 #endif							/* WIN32 */
 
@@ -322,7 +351,7 @@ help(const char *progname)
 	printf(_("  -?, --help         show this help, then exit\n"));
 
 	printf(_("\nDeveloper options:\n"));
-	printf(_("  -f s|i|n|m|h       forbid use of some plan types\n"));
+	printf(_("  -f s|i|o|b|t|n|m|h forbid use of some plan types\n"));
 	printf(_("  -n                 do not reinitialize shared memory after abnormal exit\n"));
 	printf(_("  -O                 allow system table structure changes\n"));
 	printf(_("  -P                 disable system indexes\n"));

@@ -3,7 +3,7 @@
  * lsyscache.c
  *	  Convenience routines for common queries in the system catalog cache.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * IDENTIFICATION
@@ -33,6 +33,7 @@
 #include "catalog/pg_proc.h"
 #include "catalog/pg_range.h"
 #include "catalog/pg_statistic.h"
+#include "catalog/pg_subscription.h"
 #include "catalog/pg_transform.h"
 #include "catalog/pg_type.h"
 #include "miscadmin.h"
@@ -1126,8 +1127,13 @@ get_constraint_name(Oid conoid)
  *		Given the OID of a unique, primary-key, or exclusion constraint,
  *		return the OID of the underlying index.
  *
- * Return InvalidOid if the index couldn't be found; this suggests the
- * given OID is bogus, but we leave it to caller to decide what to do.
+ * Returns InvalidOid if the constraint could not be found or is of
+ * the wrong type.
+ *
+ * The intent of this function is to return the index "owned" by the
+ * specified constraint.  Therefore we must check contype, since some
+ * pg_constraint entries (e.g. for foreign-key constraints) store the
+ * OID of an index that is referenced but not owned by the constraint.
  */
 Oid
 get_constraint_index(Oid conoid)
@@ -1140,7 +1146,12 @@ get_constraint_index(Oid conoid)
 		Form_pg_constraint contup = (Form_pg_constraint) GETSTRUCT(tp);
 		Oid			result;
 
-		result = contup->conindid;
+		if (contup->contype == CONSTRAINT_UNIQUE ||
+			contup->contype == CONSTRAINT_PRIMARY ||
+			contup->contype == CONSTRAINT_EXCLUSION)
+			result = contup->conindid;
+		else
+			result = InvalidOid;
 		ReleaseSysCache(tp);
 		return result;
 	}
@@ -3567,4 +3578,104 @@ get_index_isclustered(Oid index_oid)
 	ReleaseSysCache(tuple);
 
 	return isclustered;
+}
+
+/*
+ * get_publication_oid - given a publication name, look up the OID
+ *
+ * If missing_ok is false, throw an error if name not found.  If true, just
+ * return InvalidOid.
+ */
+Oid
+get_publication_oid(const char *pubname, bool missing_ok)
+{
+	Oid			oid;
+
+	oid = GetSysCacheOid1(PUBLICATIONNAME, Anum_pg_publication_oid,
+						  CStringGetDatum(pubname));
+	if (!OidIsValid(oid) && !missing_ok)
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_OBJECT),
+				 errmsg("publication \"%s\" does not exist", pubname)));
+	return oid;
+}
+
+/*
+ * get_publication_name - given a publication Oid, look up the name
+ *
+ * If missing_ok is false, throw an error if name not found.  If true, just
+ * return NULL.
+ */
+char *
+get_publication_name(Oid pubid, bool missing_ok)
+{
+	HeapTuple	tup;
+	char	*pubname;
+	Form_pg_publication pubform;
+
+	tup = SearchSysCache1(PUBLICATIONOID, ObjectIdGetDatum(pubid));
+
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for publication %u", pubid);
+		return NULL;
+	}
+
+	pubform = (Form_pg_publication) GETSTRUCT(tup);
+	pubname = pstrdup(NameStr(pubform->pubname));
+
+	ReleaseSysCache(tup);
+
+	return pubname;
+}
+
+/*
+ * get_subscription_oid - given a subscription name, look up the OID
+ *
+ * If missing_ok is false, throw an error if name not found.  If true, just
+ * return InvalidOid.
+ */
+Oid
+get_subscription_oid(const char* subname, bool missing_ok)
+{
+	Oid			oid;
+
+	oid = GetSysCacheOid2(SUBSCRIPTIONNAME, Anum_pg_subscription_oid,
+						   MyDatabaseId, CStringGetDatum(subname));
+	if (!OidIsValid(oid) && !missing_ok)
+		ereport(ERROR,
+			(errcode(ERRCODE_UNDEFINED_OBJECT),
+			 errmsg("subscription \"%s\" does not exist", subname)));
+	return oid;
+}
+
+/*
+ * get_subscription_name - given a subscription OID, look up the name
+ *
+ * If missing_ok is false, throw an error if name not found.  If true, just
+ * return NULL.
+ */
+char *
+get_subscription_name(Oid subid, bool missing_ok)
+{
+	HeapTuple	tup;
+	char* subname;
+	Form_pg_subscription subform;
+
+	tup = SearchSysCache1(SUBSCRIPTIONOID, ObjectIdGetDatum(subid));
+
+	if (!HeapTupleIsValid(tup))
+	{
+		if (!missing_ok)
+			elog(ERROR, "cache lookup failed for subscription %u", subid);
+		return NULL;
+	}
+
+	subform = (Form_pg_subscription) GETSTRUCT(tup);
+	subname = pstrdup(NameStr(subform->subname));
+
+	ReleaseSysCache(tup);
+
+	return subname;
 }

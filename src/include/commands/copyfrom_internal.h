@@ -4,7 +4,7 @@
  *	  Internal definitions for COPY FROM command.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/commands/copyfrom_internal.h
@@ -58,7 +58,7 @@ typedef struct CopyFromStateData
 	/* low-level state data */
 	CopySource	copy_src;		/* type of copy source */
 	FILE	   *copy_file;		/* used if copy_src == COPY_FILE */
-	StringInfo	fe_msgbuf;		/* used if copy_src == COPY_NEW_FE */
+	StringInfo	fe_msgbuf;		/* used if copy_src == COPY_FRONTEND */
 
 	EolType		eol_type;		/* EOL type of input */
 	int			file_encoding;	/* file or remote side's character encoding */

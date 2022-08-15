@@ -3,7 +3,7 @@
  * acl.c
  *	  Basic access control list data structures manipulation routines.
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -23,6 +23,7 @@
 #include "catalog/pg_authid.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_parameter_acl.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "commands/proclang.h"
@@ -36,6 +37,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/guc.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -84,7 +86,6 @@ static void check_circularity(const Acl *old_acl, const AclItem *mod_aip,
 static Acl *recursive_revoke(Acl *acl, Oid grantee, AclMode revoke_privs,
 							 Oid ownerId, DropBehavior behavior);
 
-static AclMode convert_priv_string(text *priv_type_text);
 static AclMode convert_any_priv_string(text *priv_type_text,
 									   const priv_map *privileges);
 
@@ -109,6 +110,7 @@ static Oid	convert_tablespace_name(text *tablespacename);
 static AclMode convert_tablespace_priv_string(text *priv_type_text);
 static Oid	convert_type_name(text *typename);
 static AclMode convert_type_priv_string(text *priv_type_text);
+static AclMode convert_parameter_priv_string(text *priv_text);
 static AclMode convert_role_priv_string(text *priv_type_text);
 static AclResult pg_role_aclcheck(Oid role_oid, Oid roleid, AclMode mode);
 
@@ -305,6 +307,12 @@ aclparse(const char *s, AclItem *aip)
 				break;
 			case ACL_CONNECT_CHR:
 				read = ACL_CONNECT;
+				break;
+			case ACL_SET_CHR:
+				read = ACL_SET;
+				break;
+			case ACL_ALTER_SYSTEM_CHR:
+				read = ACL_ALTER_SYSTEM;
 				break;
 			case 'R':			/* ignore old RULE privileges */
 				read = 0;
@@ -794,6 +802,10 @@ acldefault(ObjectType objtype, Oid ownerId)
 			world_default = ACL_USAGE;
 			owner_default = ACL_ALL_RIGHTS_TYPE;
 			break;
+		case OBJECT_PARAMETER_ACL:
+			world_default = ACL_NO_RIGHTS;
+			owner_default = ACL_ALL_RIGHTS_PARAMETER_ACL;
+			break;
 		default:
 			elog(ERROR, "unrecognized objtype: %d", (int) objtype);
 			world_default = ACL_NO_RIGHTS;	/* keep compiler quiet */
@@ -875,6 +887,9 @@ acldefault_sql(PG_FUNCTION_ARGS)
 			break;
 		case 'n':
 			objtype = OBJECT_SCHEMA;
+			break;
+		case 'p':
+			objtype = OBJECT_PARAMETER_ACL;
 			break;
 		case 't':
 			objtype = OBJECT_TABLESPACE;
@@ -1557,8 +1572,27 @@ makeaclitem(PG_FUNCTION_ARGS)
 	bool		goption = PG_GETARG_BOOL(3);
 	AclItem    *result;
 	AclMode		priv;
+	static const priv_map any_priv_map[] = {
+		{"SELECT", ACL_SELECT},
+		{"INSERT", ACL_INSERT},
+		{"UPDATE", ACL_UPDATE},
+		{"DELETE", ACL_DELETE},
+		{"TRUNCATE", ACL_TRUNCATE},
+		{"REFERENCES", ACL_REFERENCES},
+		{"TRIGGER", ACL_TRIGGER},
+		{"EXECUTE", ACL_EXECUTE},
+		{"USAGE", ACL_USAGE},
+		{"CREATE", ACL_CREATE},
+		{"TEMP", ACL_CREATE_TEMP},
+		{"TEMPORARY", ACL_CREATE_TEMP},
+		{"CONNECT", ACL_CONNECT},
+		{"SET", ACL_SET},
+		{"ALTER SYSTEM", ACL_ALTER_SYSTEM},
+		{"RULE", 0},			/* ignore old RULE privileges */
+		{NULL, 0}
+	};
 
-	priv = convert_priv_string(privtext);
+	priv = convert_any_priv_string(privtext, any_priv_map);
 
 	result = (AclItem *) palloc(sizeof(AclItem));
 
@@ -1569,46 +1603,6 @@ makeaclitem(PG_FUNCTION_ARGS)
 							   (goption ? priv : ACL_NO_RIGHTS));
 
 	PG_RETURN_ACLITEM_P(result);
-}
-
-static AclMode
-convert_priv_string(text *priv_type_text)
-{
-	char	   *priv_type = text_to_cstring(priv_type_text);
-
-	if (pg_strcasecmp(priv_type, "SELECT") == 0)
-		return ACL_SELECT;
-	if (pg_strcasecmp(priv_type, "INSERT") == 0)
-		return ACL_INSERT;
-	if (pg_strcasecmp(priv_type, "UPDATE") == 0)
-		return ACL_UPDATE;
-	if (pg_strcasecmp(priv_type, "DELETE") == 0)
-		return ACL_DELETE;
-	if (pg_strcasecmp(priv_type, "TRUNCATE") == 0)
-		return ACL_TRUNCATE;
-	if (pg_strcasecmp(priv_type, "REFERENCES") == 0)
-		return ACL_REFERENCES;
-	if (pg_strcasecmp(priv_type, "TRIGGER") == 0)
-		return ACL_TRIGGER;
-	if (pg_strcasecmp(priv_type, "EXECUTE") == 0)
-		return ACL_EXECUTE;
-	if (pg_strcasecmp(priv_type, "USAGE") == 0)
-		return ACL_USAGE;
-	if (pg_strcasecmp(priv_type, "CREATE") == 0)
-		return ACL_CREATE;
-	if (pg_strcasecmp(priv_type, "TEMP") == 0)
-		return ACL_CREATE_TEMP;
-	if (pg_strcasecmp(priv_type, "TEMPORARY") == 0)
-		return ACL_CREATE_TEMP;
-	if (pg_strcasecmp(priv_type, "CONNECT") == 0)
-		return ACL_CONNECT;
-	if (pg_strcasecmp(priv_type, "RULE") == 0)
-		return 0;				/* ignore old RULE privileges */
-
-	ereport(ERROR,
-			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-			 errmsg("unrecognized privilege type: \"%s\"", priv_type)));
-	return ACL_NO_RIGHTS;		/* keep compiler quiet */
 }
 
 
@@ -1698,6 +1692,10 @@ convert_aclright_to_string(int aclright)
 			return "TEMPORARY";
 		case ACL_CONNECT:
 			return "CONNECT";
+		case ACL_SET:
+			return "SET";
+		case ACL_ALTER_SYSTEM:
+			return "ALTER SYSTEM";
 		default:
 			elog(ERROR, "unrecognized aclright: %d", aclright);
 			return NULL;
@@ -1787,15 +1785,13 @@ aclexplode(PG_FUNCTION_ARGS)
 		{
 			Datum		result;
 			Datum		values[4];
-			bool		nulls[4];
+			bool		nulls[4] = {0};
 			HeapTuple	tuple;
 
 			values[0] = ObjectIdGetDatum(aidata->ai_grantor);
 			values[1] = ObjectIdGetDatum(aidata->ai_grantee);
 			values[2] = CStringGetTextDatum(convert_aclright_to_string(priv_bit));
 			values[3] = BoolGetDatum((ACLITEM_GET_GOPTIONS(*aidata) & priv_bit) != 0);
-
-			MemSet(nulls, 0, sizeof(nulls));
 
 			tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
 			result = HeapTupleGetDatum(tuple);
@@ -3070,7 +3066,6 @@ convert_database_priv_string(text *priv_type_text)
 	};
 
 	return convert_any_priv_string(priv_type_text, database_priv_map);
-
 }
 
 
@@ -4429,6 +4424,96 @@ convert_type_priv_string(text *priv_type_text)
 	return convert_any_priv_string(priv_type_text, type_priv_map);
 }
 
+/*
+ * has_parameter_privilege variants
+ *		These are all named "has_parameter_privilege" at the SQL level.
+ *		They take various combinations of parameter name with
+ *		user name, user OID, or implicit user = current_user.
+ *
+ *		The result is a boolean value: true if user has been granted
+ *		the indicated privilege or false if not.
+ */
+
+/*
+ * has_param_priv_byname
+ *
+ *		Helper function to check user privileges on a parameter given the
+ *		role by Oid, parameter by text name, and privileges as AclMode.
+ */
+static bool
+has_param_priv_byname(Oid roleid, const text *parameter, AclMode priv)
+{
+	char	   *paramstr = text_to_cstring(parameter);
+
+	return pg_parameter_aclcheck(paramstr, roleid, priv) == ACLCHECK_OK;
+}
+
+/*
+ * has_parameter_privilege_name_name
+ *		Check user privileges on a parameter given name username, text
+ *		parameter, and text priv name.
+ */
+Datum
+has_parameter_privilege_name_name(PG_FUNCTION_ARGS)
+{
+	Name		username = PG_GETARG_NAME(0);
+	text	   *parameter = PG_GETARG_TEXT_PP(1);
+	AclMode		priv = convert_parameter_priv_string(PG_GETARG_TEXT_PP(2));
+	Oid			roleid = get_role_oid_or_public(NameStr(*username));
+
+	PG_RETURN_BOOL(has_param_priv_byname(roleid, parameter, priv));
+}
+
+/*
+ * has_parameter_privilege_name
+ *		Check user privileges on a parameter given text parameter and text priv
+ *		name.  current_user is assumed
+ */
+Datum
+has_parameter_privilege_name(PG_FUNCTION_ARGS)
+{
+	text	   *parameter = PG_GETARG_TEXT_PP(0);
+	AclMode		priv = convert_parameter_priv_string(PG_GETARG_TEXT_PP(1));
+
+	PG_RETURN_BOOL(has_param_priv_byname(GetUserId(), parameter, priv));
+}
+
+/*
+ * has_parameter_privilege_id_name
+ *		Check user privileges on a parameter given roleid, text parameter, and
+ *		text priv name.
+ */
+Datum
+has_parameter_privilege_id_name(PG_FUNCTION_ARGS)
+{
+	Oid			roleid = PG_GETARG_OID(0);
+	text	   *parameter = PG_GETARG_TEXT_PP(1);
+	AclMode		priv = convert_parameter_priv_string(PG_GETARG_TEXT_PP(2));
+
+	PG_RETURN_BOOL(has_param_priv_byname(roleid, parameter, priv));
+}
+
+/*
+ *		Support routines for has_parameter_privilege family.
+ */
+
+/*
+ * convert_parameter_priv_string
+ *		Convert text string to AclMode value.
+ */
+static AclMode
+convert_parameter_priv_string(text *priv_text)
+{
+	static const priv_map parameter_priv_map[] = {
+		{"SET", ACL_SET},
+		{"SET WITH GRANT OPTION", ACL_GRANT_OPTION_FOR(ACL_SET)},
+		{"ALTER SYSTEM", ACL_ALTER_SYSTEM},
+		{"ALTER SYSTEM WITH GRANT OPTION", ACL_GRANT_OPTION_FOR(ACL_ALTER_SYSTEM)},
+		{NULL, 0}
+	};
+
+	return convert_any_priv_string(priv_text, parameter_priv_map);
+}
 
 /*
  * pg_has_role variants
@@ -4619,11 +4704,6 @@ pg_role_aclcheck(Oid role_oid, Oid roleid, AclMode mode)
 {
 	if (mode & ACL_GRANT_OPTION_FOR(ACL_CREATE))
 	{
-		/*
-		 * XXX For roleid == role_oid, is_admin_of_role() also examines the
-		 * session and call stack.  That suits two-argument pg_has_role(), but
-		 * it gives the three-argument version a lamentable whimsy.
-		 */
 		if (is_admin_of_role(roleid, role_oid))
 			return ACLCHECK_OK;
 	}
@@ -4864,6 +4944,8 @@ has_privs_of_role(Oid member, Oid role)
  * Is member a member of role (directly or indirectly)?
  *
  * This is defined to recurse through roles regardless of rolinherit.
+ *
+ * Do not use this for privilege checking, instead use has_privs_of_role()
  */
 bool
 is_member_of_role(Oid member, Oid role)
@@ -4904,6 +4986,8 @@ check_is_member_of_role(Oid member, Oid role)
  *
  * This is identical to is_member_of_role except we ignore superuser
  * status.
+ *
+ * Do not use this for privilege checking, instead use has_privs_of_role()
  */
 bool
 is_member_of_role_nosuper(Oid member, Oid role)
@@ -4935,38 +5019,9 @@ is_admin_of_role(Oid member, Oid role)
 	if (superuser_arg(member))
 		return true;
 
+	/* By policy, a role cannot have WITH ADMIN OPTION on itself. */
 	if (member == role)
-
-		/*
-		 * A role can admin itself when it matches the session user and we're
-		 * outside any security-restricted operation, SECURITY DEFINER or
-		 * similar context.  SQL-standard roles cannot self-admin.  However,
-		 * SQL-standard users are distinct from roles, and they are not
-		 * grantable like roles: PostgreSQL's role-user duality extends the
-		 * standard.  Checking for a session user match has the effect of
-		 * letting a role self-admin only when it's conspicuously behaving
-		 * like a user.  Note that allowing self-admin under a mere SET ROLE
-		 * would make WITH ADMIN OPTION largely irrelevant; any member could
-		 * SET ROLE to issue the otherwise-forbidden command.
-		 *
-		 * Withholding self-admin in a security-restricted operation prevents
-		 * object owners from harnessing the session user identity during
-		 * administrative maintenance.  Suppose Alice owns a database, has
-		 * issued "GRANT alice TO bob", and runs a daily ANALYZE.  Bob creates
-		 * an alice-owned SECURITY DEFINER function that issues "REVOKE alice
-		 * FROM carol".  If he creates an expression index calling that
-		 * function, Alice will attempt the REVOKE during each ANALYZE.
-		 * Checking InSecurityRestrictedOperation() thwarts that attack.
-		 *
-		 * Withholding self-admin in SECURITY DEFINER functions makes their
-		 * behavior independent of the calling user.  There's no security or
-		 * SQL-standard-conformance need for that restriction, though.
-		 *
-		 * A role cannot have actual WITH ADMIN OPTION on itself, because that
-		 * would imply a membership loop.  Therefore, we're done either way.
-		 */
-		return member == GetSessionUserId() &&
-			!InLocalUserIdChange() && !InSecurityRestrictedOperation();
+		return false;
 
 	(void) roles_is_member_of(member, ROLERECURSE_MEMBERS, role, &result);
 	return result;

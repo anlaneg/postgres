@@ -3,7 +3,7 @@
  * postinit.c
  *	  postgres initialization utilities
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -27,9 +27,11 @@
 #include "access/tableam.h"
 #include "access/xact.h"
 #include "access/xlog.h"
+#include "access/xloginsert.h"
 #include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
+#include "catalog/pg_collation.h"
 #include "catalog/pg_database.h"
 #include "catalog/pg_db_role_setting.h"
 #include "catalog/pg_tablespace.h"
@@ -40,6 +42,7 @@
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/postmaster.h"
+#include "replication/slot.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
 #include "storage/fd.h"
@@ -53,6 +56,7 @@
 #include "storage/sync.h"
 #include "tcop/tcopprot.h"
 #include "utils/acl.h"
+#include "utils/builtins.h"
 #include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
@@ -72,6 +76,7 @@ static void StatementTimeoutHandler(void);
 static void LockTimeoutHandler(void);
 static void IdleInTransactionSessionTimeoutHandler(void);
 static void IdleSessionTimeoutHandler(void);
+static void IdleStatsUpdateTimeoutHandler(void);
 static void ClientCheckTimeoutHandler(void);
 static bool ThereIsAtLeastOneRole(void);
 static void process_startup_options(Port *port, bool am_superuser);
@@ -212,7 +217,8 @@ PerformAuthentication(Port *port)
 		 * since there is no way to connect to the database in this case.
 		 */
 		ereport(FATAL,
-				(errmsg("could not load pg_hba.conf")));
+		/* translator: %s is a configuration file */
+				(errmsg("could not load %s", HbaFileName)));
 	}
 
 	if (!load_ident())
@@ -306,8 +312,11 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 {
 	HeapTuple	tup;
 	Form_pg_database dbform;
+	Datum		datum;
+	bool		isnull;
 	char	   *collate;
 	char	   *ctype;
+	char	   *iculocale;
 
 	/* Fetch our pg_database row normally, via syscache */
 	tup = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
@@ -383,14 +392,18 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 	SetDatabaseEncoding(dbform->encoding);
 	/* Record it as a GUC internal option, too */
 	SetConfigOption("server_encoding", GetDatabaseEncodingName(),
-					PGC_INTERNAL, PGC_S_OVERRIDE);
+					PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 	/* If we have no other source of client_encoding, use server encoding */
 	SetConfigOption("client_encoding", GetDatabaseEncodingName(),
 					PGC_BACKEND, PGC_S_DYNAMIC_DEFAULT);
 
 	/* assign locale variables */
-	collate = NameStr(dbform->datcollate);
-	ctype = NameStr(dbform->datctype);
+	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datcollate, &isnull);
+	Assert(!isnull);
+	collate = TextDatumGetCString(datum);
+	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datctype, &isnull);
+	Assert(!isnull);
+	ctype = TextDatumGetCString(datum);
 
 	if (pg_perm_setlocale(LC_COLLATE, collate) == NULL)
 		ereport(FATAL,
@@ -406,9 +419,60 @@ CheckMyDatabase(const char *name, bool am_superuser, bool override_allow_connect
 						   " which is not recognized by setlocale().", ctype),
 				 errhint("Recreate the database with another locale or install the missing locale.")));
 
+	if (dbform->datlocprovider == COLLPROVIDER_ICU)
+	{
+		datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_daticulocale, &isnull);
+		Assert(!isnull);
+		iculocale = TextDatumGetCString(datum);
+		make_icu_collator(iculocale, &default_locale);
+	}
+	else
+		iculocale = NULL;
+
+	default_locale.provider = dbform->datlocprovider;
+
+	/*
+	 * Default locale is currently always deterministic.  Nondeterministic
+	 * locales currently don't support pattern matching, which would break a
+	 * lot of things if applied globally.
+	 */
+	default_locale.deterministic = true;
+
+	/*
+	 * Check collation version.  See similar code in
+	 * pg_newlocale_from_collation().  Note that here we warn instead of error
+	 * in any case, so that we don't prevent connecting.
+	 */
+	datum = SysCacheGetAttr(DATABASEOID, tup, Anum_pg_database_datcollversion,
+							&isnull);
+	if (!isnull)
+	{
+		char	   *actual_versionstr;
+		char	   *collversionstr;
+
+		collversionstr = TextDatumGetCString(datum);
+
+		actual_versionstr = get_collation_actual_version(dbform->datlocprovider, dbform->datlocprovider == COLLPROVIDER_ICU ? iculocale : collate);
+		if (!actual_versionstr)
+			ereport(WARNING,
+					(errmsg("database \"%s\" has no actual collation version, but a version was recorded",
+							name)));
+		else if (strcmp(actual_versionstr, collversionstr) != 0)
+			ereport(WARNING,
+					(errmsg("database \"%s\" has a collation version mismatch",
+							name),
+					 errdetail("The database was created using collation version %s, "
+							   "but the operating system provides version %s.",
+							   collversionstr, actual_versionstr),
+					 errhint("Rebuild all objects in this database that use the default collation and run "
+							 "ALTER DATABASE %s REFRESH COLLATION VERSION, "
+							 "or build PostgreSQL with the right library version.",
+							 quote_identifier(name))));
+	}
+
 	/* Make the locale settings visible as GUC variables, too */
-	SetConfigOption("lc_collate", collate, PGC_INTERNAL, PGC_S_OVERRIDE);
-	SetConfigOption("lc_ctype", ctype, PGC_INTERNAL, PGC_S_OVERRIDE);
+	SetConfigOption("lc_collate", collate, PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
+	SetConfigOption("lc_ctype", ctype, PGC_INTERNAL, PGC_S_DYNAMIC_DEFAULT);
 
 	check_strxfrm_bug();
 
@@ -476,9 +540,8 @@ pg_split_opts(char **argv, int *argcp, const char *optstr)
 /*
  * Initialize MaxBackends value from config options.
  *
- * This must be called after modules have had the chance to register background
- * workers in shared_preload_libraries, and before shared memory size is
- * determined.
+ * This must be called after modules have had the chance to alter GUCs in
+ * shared_preload_libraries and before shared memory size is determined.
  *
  * Note that in EXEC_BACKEND environment, the value is passed down from
  * postmaster to subprocesses via BackendParameters in SubPostmasterMain; only
@@ -543,10 +606,16 @@ BaseInit(void)
 	InitTemporaryFileAccess();
 
 	/*
-	 * Initialize local buffers for WAL record construction, in case we
-	 * ever try to insert XLOG.
+	 * Initialize local buffers for WAL record construction, in case we ever
+	 * try to insert XLOG.
 	 */
 	InitXLogInsert();
+
+	/*
+	 * Initialize replication slots after pgstat. The exit hook might need to
+	 * drop ephemeral slots, which in turn triggers stats reporting.
+	 */
+	ReplicationSlotInitialize();
 }
 
 
@@ -554,29 +623,48 @@ BaseInit(void)
  * InitPostgres
  *		Initialize POSTGRES.
  *
+ * Parameters:
+ *	in_dbname, dboid: specify database to connect to, as described below
+ *	username, useroid: specify role to connect as, as described below
+ *	load_session_libraries: TRUE to honor [session|local]_preload_libraries
+ *	override_allow_connections: TRUE to connect despite !datallowconn
+ *	out_dbname: optional output parameter, see below; pass NULL if not used
+ *
  * The database can be specified by name, using the in_dbname parameter, or by
- * OID, using the dboid parameter.  In the latter case, the actual database
+ * OID, using the dboid parameter.  Specify NULL or InvalidOid respectively
+ * for the unused parameter.  If dboid is provided, the actual database
  * name can be returned to the caller in out_dbname.  If out_dbname isn't
  * NULL, it must point to a buffer of size NAMEDATALEN.
  *
- * Similarly, the username can be passed by name, using the username parameter,
+ * Similarly, the role can be passed by name, using the username parameter,
  * or by OID using the useroid parameter.
  *
- * In bootstrap mode no parameters are used.  The autovacuum launcher process
- * doesn't use any parameters either, because it only goes far enough to be
- * able to read pg_database; it doesn't connect to any particular database.
- * In walsender mode only username is used.
+ * In bootstrap mode the database and username parameters are NULL/InvalidOid.
+ * The autovacuum launcher process doesn't specify these parameters either,
+ * because it only goes far enough to be able to read pg_database; it doesn't
+ * connect to any particular database.  An autovacuum worker specifies a
+ * database but not a username; conversely, a physical walsender specifies
+ * username but not database.
  *
- * As of PostgreSQL 8.2, we expect InitProcess() was already called, so we
- * already have a PGPROC struct ... but it's not completely filled in yet.
+ * By convention, load_session_libraries should be passed as true in
+ * "interactive" sessions (including standalone backends), but false in
+ * background processes such as autovacuum.  Note in particular that it
+ * shouldn't be true in parallel worker processes; those have another
+ * mechanism for replicating their leader's set of loaded libraries.
+ *
+ * We expect that InitProcess() was already called, so we already have a
+ * PGPROC struct ... but it's not completely filled in yet.
  *
  * Note:
  *		Be very careful with the order of calls in the InitPostgres function.
  * --------------------------------
  */
 void
-InitPostgres(const char *in_dbname, Oid dboid, const char *username,
-			 Oid useroid, char *out_dbname, bool override_allow_connections)
+InitPostgres(const char *in_dbname, Oid dboid,
+			 const char *username, Oid useroid,
+			 bool load_session_libraries,
+			 bool override_allow_connections,
+			 char *out_dbname)
 {
 	bool		bootstrap = IsBootstrapProcessingMode();
 	bool		am_superuser;
@@ -621,13 +709,15 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 						IdleInTransactionSessionTimeoutHandler);
 		RegisterTimeout(IDLE_SESSION_TIMEOUT, IdleSessionTimeoutHandler);
 		RegisterTimeout(CLIENT_CONNECTION_CHECK_TIMEOUT, ClientCheckTimeoutHandler);
+		RegisterTimeout(IDLE_STATS_UPDATE_TIMEOUT,
+						IdleStatsUpdateTimeoutHandler);
 	}
 
 	/*
-	 * If this is either a bootstrap process nor a standalone backend, start
-	 * up the XLOG machinery, and register to have it closed down at exit.
-	 * In other cases, the startup process is responsible for starting up
-	 * the XLOG machinery, and the checkpointer for closing it down.
+	 * If this is either a bootstrap process or a standalone backend, start up
+	 * the XLOG machinery, and register to have it closed down at exit. In
+	 * other cases, the startup process is responsible for starting up the
+	 * XLOG machinery, and the checkpointer for closing it down.
 	 */
 	if (!IsUnderPostmaster)
 	{
@@ -648,6 +738,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 		 * Use before_shmem_exit() so that ShutdownXLOG() can rely on DSM
 		 * segments etc to work (which in turn is required for pgstats).
 		 */
+		before_shmem_exit(pgstat_before_server_shutdown, 0);
 		before_shmem_exit(ShutdownXLOG, 0);
 	}
 
@@ -768,24 +859,6 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	}
 
 	/*
-	 * If we're trying to shut down, only superusers can connect, and new
-	 * replication connections are not allowed.
-	 */
-	if ((!am_superuser || am_walsender) &&
-		MyProcPort != NULL &&
-		MyProcPort->canAcceptConnections == CAC_SUPERUSER)
-	{
-		if (am_walsender)
-			ereport(FATAL,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("new replication connections are not allowed during database shutdown")));
-		else
-			ereport(FATAL,
-					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					 errmsg("must be superuser to connect during database shutdown")));
-	}
-
-	/*
 	 * Binary upgrades only allowed super-user connections
 	 */
 	if (IsBinaryUpgrade && !am_superuser)
@@ -855,7 +928,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 */
 	if (bootstrap)
 	{
-		MyDatabaseId = TemplateDbOid;
+		MyDatabaseId = Template1DbOid;
 		MyDatabaseTableSpace = DEFAULTTABLESPACE_OID;
 	}
 	else if (in_dbname != NULL)
@@ -1004,6 +1077,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	}
 
 	SetDatabasePath(fullpath);
+	pfree(fullpath);
 
 	/*
 	 * It's now possible to do real access to the system catalogs.
@@ -1053,6 +1127,16 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 
 	/* Initialize this backend's session state. */
 	InitializeSession();
+
+	/*
+	 * If this is an interactive session, load any libraries that should be
+	 * preloaded at backend start.  Since those are determined by GUCs, this
+	 * can't happen until GUC settings are complete, but we want it to happen
+	 * during the initial transaction in case anything that requires database
+	 * access needs to be done.
+	 */
+	if (load_session_libraries)
+		process_session_preload_libraries();
 
 	/* report this backend in the PgBackendStatus array */
 	if (!bootstrap)
@@ -1227,6 +1311,14 @@ static void
 IdleSessionTimeoutHandler(void)
 {
 	IdleSessionTimeoutPending = true;
+	InterruptPending = true;
+	SetLatch(MyLatch);
+}
+
+static void
+IdleStatsUpdateTimeoutHandler(void)
+{
+	IdleStatsUpdateTimeoutPending = true;
 	InterruptPending = true;
 	SetLatch(MyLatch);
 }

@@ -92,7 +92,7 @@
  * heap's TOAST table will go through the normal bufmgr.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  * IDENTIFICATION
@@ -318,7 +318,7 @@ end_heap_rewrite(RewriteState state)
 	if (state->rs_buffer_valid)
 	{
 		if (RelationNeedsWAL(state->rs_new_rel))
-			log_newpage(&state->rs_new_rel->rd_node,
+			log_newpage(&state->rs_new_rel->rd_locator,
 						MAIN_FORKNUM,
 						state->rs_blockno,
 						state->rs_buffer,
@@ -679,7 +679,7 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
 
 			/* XLOG stuff */
 			if (RelationNeedsWAL(state->rs_new_rel))
-				log_newpage(&state->rs_new_rel->rd_node,
+				log_newpage(&state->rs_new_rel->rd_locator,
 							MAIN_FORKNUM,
 							state->rs_blockno,
 							page,
@@ -741,8 +741,8 @@ raw_heap_insert(RewriteState state, HeapTuple tup)
  *
  * When doing logical decoding - which relies on using cmin/cmax of catalog
  * tuples, via xl_heap_new_cid records - heap rewrites have to log enough
- * information to allow the decoding backend to updates its internal mapping
- * of (relfilenode,ctid) => (cmin, cmax) to be correct for the rewritten heap.
+ * information to allow the decoding backend to update its internal mapping
+ * of (relfilelocator,ctid) => (cmin, cmax) to be correct for the rewritten heap.
  *
  * For that, every time we find a tuple that's been modified in a catalog
  * relation within the xmin horizon of any decoding slot, we log a mapping
@@ -1080,9 +1080,9 @@ logical_rewrite_heap_tuple(RewriteState state, ItemPointerData old_tid,
 		return;
 
 	/* fill out mapping information */
-	map.old_node = state->rs_old_rel->rd_node;
+	map.old_locator = state->rs_old_rel->rd_locator;
 	map.old_tid = old_tid;
-	map.new_node = state->rs_new_rel->rd_node;
+	map.new_locator = state->rs_new_rel->rd_locator;
 	map.new_tid = new_tid;
 
 	/* ---
@@ -1149,7 +1149,7 @@ heap_xlog_logical_rewrite(XLogReaderState *r)
 	/* write out tail end of mapping file (again) */
 	errno = 0;
 	pgstat_report_wait_start(WAIT_EVENT_LOGICAL_REWRITE_MAPPING_WRITE);
-	if (pg_pwrite(fd, data, len, xlrec->offset) != len)
+	if (pwrite(fd, data, len, xlrec->offset) != len)
 	{
 		/* if write didn't set errno, assume problem is no disk space */
 		if (errno == 0)
@@ -1282,4 +1282,7 @@ CheckPointLogicalRewriteHeap(void)
 		}
 	}
 	FreeDir(mappings_dir);
+
+	/* persist directory entries to disk */
+	fsync_fname("pg_logical/mappings", true);
 }

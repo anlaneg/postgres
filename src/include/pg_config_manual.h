@@ -6,7 +6,7 @@
  * for developers.  If you edit any of these, be sure to do a *full*
  * rebuild (and an initdb if noted).
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/pg_config_manual.h
@@ -153,13 +153,6 @@
 #endif
 
 /*
- * Define this if your operating system supports link()
- */
-#if !defined(WIN32) && !defined(__CYGWIN__)
-#define HAVE_WORKING_LINK 1
-#endif
-
-/*
  * USE_POSIX_FADVISE controls whether Postgres will attempt to use the
  * posix_fadvise() kernel call.  Usually the automatic configure tests are
  * sufficient, but some older Linux distributions had broken versions of
@@ -233,32 +226,6 @@
  * This is the default event source for Windows event log.
  */
 #define DEFAULT_EVENT_SOURCE  "PostgreSQL"
-
-/*
- * On PPC machines, decide whether to use the mutex hint bit in LWARX
- * instructions.  Setting the hint bit will slightly improve spinlock
- * performance on POWER6 and later machines, but does nothing before that,
- * and will result in illegal-instruction failures on some pre-POWER4
- * machines.  By default we use the hint bit when building for 64-bit PPC,
- * which should be safe in nearly all cases.  You might want to override
- * this if you are building 32-bit code for a known-recent PPC machine.
- */
-#ifdef HAVE_PPC_LWARX_MUTEX_HINT	/* must have assembler support in any case */
-#if defined(__ppc64__) || defined(__powerpc64__)
-#define USE_PPC_LWARX_MUTEX_HINT
-#endif
-#endif
-
-/*
- * On PPC machines, decide whether to use LWSYNC instructions in place of
- * ISYNC and SYNC.  This provides slightly better performance, but will
- * result in illegal-instruction failures on some pre-POWER4 machines.
- * By default we use LWSYNC when building for 64-bit PPC, which should be
- * safe in nearly all cases.
- */
-#if defined(__ppc64__) || defined(__powerpc64__)
-#define USE_PPC_LWSYNC
-#endif
 
 /*
  * Assumed cache line size. This doesn't affect correctness, but can be used

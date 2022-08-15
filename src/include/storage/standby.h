@@ -4,7 +4,7 @@
  *	  Definitions for hot standby mode.
  *
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  * src/include/storage/standby.h
@@ -17,22 +17,22 @@
 #include "datatype/timestamp.h"
 #include "storage/lock.h"
 #include "storage/procsignal.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "storage/standbydefs.h"
 
 /* User-settable GUC parameters */
-extern int	vacuum_defer_cleanup_age;
-extern int	max_standby_archive_delay;
-extern int	max_standby_streaming_delay;
-extern bool log_recovery_conflict_waits;
+extern PGDLLIMPORT int vacuum_defer_cleanup_age;
+extern PGDLLIMPORT int max_standby_archive_delay;
+extern PGDLLIMPORT int max_standby_streaming_delay;
+extern PGDLLIMPORT bool log_recovery_conflict_waits;
 
 extern void InitRecoveryTransactionEnvironment(void);
 extern void ShutdownRecoveryTransactionEnvironment(void);
 
 extern void ResolveRecoveryConflictWithSnapshot(TransactionId latestRemovedXid,
-												RelFileNode node);
+												RelFileLocator locator);
 extern void ResolveRecoveryConflictWithSnapshotFullXid(FullTransactionId latestRemovedFullXid,
-													   RelFileNode node);
+													   RelFileLocator locator);
 extern void ResolveRecoveryConflictWithTablespace(Oid tsid);
 extern void ResolveRecoveryConflictWithDatabase(Oid dbid);
 

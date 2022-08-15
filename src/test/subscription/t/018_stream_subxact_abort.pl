@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Test streaming of large transaction containing multiple subtransactions and rollbacks
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 4;
+use Test::More;
 
 # Create publisher node
 my $node_publisher = PostgreSQL::Test::Cluster->new('publisher');
@@ -40,13 +40,8 @@ $node_subscriber->safe_psql('postgres',
 	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub WITH (streaming = on)"
 );
 
-$node_publisher->wait_for_catchup($appname);
-
-# Also wait for initial table sync to finish
-my $synced_query =
-  "SELECT count(1) = 0 FROM pg_subscription_rel WHERE srsubstate NOT IN ('r', 's');";
-$node_subscriber->poll_query_until('postgres', $synced_query)
-  or die "Timed out while waiting for subscriber to synchronize data";
+# Wait for initial table sync to finish
+$node_subscriber->wait_for_subscription_sync($node_publisher, $appname);
 
 my $result =
   $node_subscriber->safe_psql('postgres',
@@ -131,3 +126,5 @@ is($result, qq(2500|0), 'check rollback was reflected on subscriber');
 
 $node_subscriber->stop;
 $node_publisher->stop;
+
+done_testing();

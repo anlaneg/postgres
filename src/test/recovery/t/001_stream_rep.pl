@@ -1,12 +1,12 @@
 
-# Copyright (c) 2021, PostgreSQL Global Development Group
+# Copyright (c) 2021-2022, PostgreSQL Global Development Group
 
 # Minimal test testing streaming replication
 use strict;
 use warnings;
 use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
-use Test::More tests => 53;
+use Test::More;
 
 # Initialize primary node
 my $node_primary = PostgreSQL::Test::Cluster->new('primary');
@@ -42,15 +42,14 @@ $node_standby_2->init_from_backup($node_standby_1, $backup_name,
 	has_streaming => 1);
 $node_standby_2->start;
 
-# Create some content on primary and check its presence in standby 1
+# Create some content on primary and check its presence in standby nodes
 $node_primary->safe_psql('postgres',
 	"CREATE TABLE tab_int AS SELECT generate_series(1,1002) AS a");
 
 # Wait for standbys to catch up
-$node_primary->wait_for_catchup($node_standby_1, 'replay',
-	$node_primary->lsn('insert'));
-$node_standby_1->wait_for_catchup($node_standby_2, 'replay',
-	$node_standby_1->lsn('replay'));
+my $primary_lsn = $node_primary->lsn('write');
+$node_primary->wait_for_catchup($node_standby_1, 'replay', $primary_lsn);
+$node_standby_1->wait_for_catchup($node_standby_2, 'replay', $primary_lsn);
 
 my $result =
   $node_standby_1->safe_psql('postgres', "SELECT count(*) FROM tab_int");
@@ -61,6 +60,23 @@ $result =
   $node_standby_2->safe_psql('postgres', "SELECT count(*) FROM tab_int");
 print "standby 2: $result\n";
 is($result, qq(1002), 'check streamed content on standby 2');
+
+# Likewise, but for a sequence
+$node_primary->safe_psql('postgres',
+	"CREATE SEQUENCE seq1; SELECT nextval('seq1')");
+
+# Wait for standbys to catch up
+$primary_lsn = $node_primary->lsn('write');
+$node_primary->wait_for_catchup($node_standby_1, 'replay', $primary_lsn);
+$node_standby_1->wait_for_catchup($node_standby_2, 'replay', $primary_lsn);
+
+$result = $node_standby_1->safe_psql('postgres', "SELECT * FROM seq1");
+print "standby 1: $result\n";
+is($result, qq(33|0|t), 'check streamed sequence content on standby 1');
+
+$result = $node_standby_2->safe_psql('postgres', "SELECT * FROM seq1");
+print "standby 2: $result\n";
+is($result, qq(33|0|t), 'check streamed sequence content on standby 2');
 
 # Check that only READ-only queries can run on standbys
 is($node_standby_1->psql('postgres', 'INSERT INTO tab_int VALUES (1)'),
@@ -356,10 +372,11 @@ sub replay_check
 	my $newval = $node_primary->safe_psql('postgres',
 		'INSERT INTO replayed(val) SELECT coalesce(max(val),0) + 1 AS newval FROM replayed RETURNING val'
 	);
-	$node_primary->wait_for_catchup($node_standby_1, 'replay',
-		$node_primary->lsn('insert'));
+	my $primary_lsn = $node_primary->lsn('write');
+	$node_primary->wait_for_catchup($node_standby_1, 'replay', $primary_lsn);
 	$node_standby_1->wait_for_catchup($node_standby_2, 'replay',
-		$node_standby_1->lsn('replay'));
+		$primary_lsn);
+
 	$node_standby_1->safe_psql('postgres',
 		qq[SELECT 1 FROM replayed WHERE val = $newval])
 	  or die "standby_1 didn't replay primary value $newval";
@@ -463,8 +480,7 @@ $node_standby_1->stop;
 my $newval = $node_primary->safe_psql('postgres',
 	'INSERT INTO replayed(val) SELECT coalesce(max(val),0) + 1 AS newval FROM replayed RETURNING val'
 );
-$node_primary->wait_for_catchup($node_standby_2, 'replay',
-	$node_primary->lsn('insert'));
+$node_primary->wait_for_catchup($node_standby_2);
 my $is_replayed = $node_standby_2->safe_psql('postgres',
 	qq[SELECT 1 FROM replayed WHERE val = $newval]);
 is($is_replayed, qq(1), "standby_2 didn't replay primary value $newval");
@@ -514,3 +530,60 @@ ok( ($phys_restart_lsn_pre cmp $phys_restart_lsn_post) == 0,
 my $primary_data = $node_primary->data_dir;
 ok(!-f "$primary_data/pg_wal/$segment_removed",
 	"WAL segment $segment_removed recycled after physical slot advancing");
+
+note "testing pg_backup_start() followed by BASE_BACKUP";
+my $connstr = $node_primary->connstr('postgres') . " replication=database";
+
+# This test requires a replication connection with a database, as it mixes
+# a replication command and a SQL command.
+$node_primary->command_fails_like(
+	[
+		'psql', '-X',          '-c', "SELECT pg_backup_start('backup', true)",
+		'-c',   'BASE_BACKUP', '-d', $connstr
+	],
+	qr/a backup is already in progress in this session/,
+	'BASE_BACKUP cannot run in session already running backup');
+
+note "testing BASE_BACKUP cancellation";
+
+my $sigchld_bb_timeout =
+  IPC::Run::timer($PostgreSQL::Test::Utils::timeout_default);
+
+# This test requires a replication connection with a database, as it mixes
+# a replication command and a SQL command.  The first BASE_BACKUP is throttled
+# to give enough room for the cancellation running below.  The second command
+# for pg_backup_stop() should fail.
+my ($sigchld_bb_stdin, $sigchld_bb_stdout, $sigchld_bb_stderr) = ('', '', '');
+my $sigchld_bb = IPC::Run::start(
+	[
+		'psql', '-X', '-c', "BASE_BACKUP (CHECKPOINT 'fast', MAX_RATE 32);",
+		'-c',   'SELECT pg_backup_stop()',
+		'-d',   $connstr
+	],
+	'<',
+	\$sigchld_bb_stdin,
+	'>',
+	\$sigchld_bb_stdout,
+	'2>',
+	\$sigchld_bb_stderr,
+	$sigchld_bb_timeout);
+
+# The cancellation is issued once the database files are streamed and
+# the checkpoint issued at backup start completes.
+is( $node_primary->poll_query_until(
+		'postgres',
+		"SELECT pg_cancel_backend(a.pid) FROM "
+		  . "pg_stat_activity a, pg_stat_progress_basebackup b WHERE "
+		  . "a.pid = b.pid AND a.query ~ 'BASE_BACKUP' AND "
+		  . "b.phase = 'streaming database files';"),
+	"1",
+	"WAL sender sending base backup killed");
+
+# The psql command should fail on pg_backup_stop().
+ok( pump_until(
+		$sigchld_bb,         $sigchld_bb_timeout,
+		\$sigchld_bb_stderr, qr/backup is not in progress/),
+	'base backup cleanly cancelled');
+$sigchld_bb->finish();
+
+done_testing();

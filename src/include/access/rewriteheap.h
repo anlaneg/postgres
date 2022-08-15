@@ -3,7 +3,7 @@
  * rewriteheap.h
  *	  Declarations for heap rewrite support functions
  *
- * Portions Copyright (c) 1996-2021, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2022, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994-5, Regents of the University of California
  *
  * src/include/access/rewriteheap.h
@@ -15,7 +15,7 @@
 
 #include "access/htup.h"
 #include "storage/itemptr.h"
-#include "storage/relfilenode.h"
+#include "storage/relfilelocator.h"
 #include "utils/relcache.h"
 
 /* struct definition is private to rewriteheap.c */
@@ -34,8 +34,8 @@ extern bool rewrite_heap_dead_tuple(RewriteState state, HeapTuple oldTuple);
  */
 typedef struct LogicalRewriteMappingData
 {
-	RelFileNode old_node;
-	RelFileNode new_node;
+	RelFileLocator old_locator;
+	RelFileLocator new_locator;
 	ItemPointerData old_tid;
 	ItemPointerData new_tid;
 } LogicalRewriteMappingData;
@@ -52,6 +52,6 @@ typedef struct LogicalRewriteMappingData
  * ---
  */
 #define LOGICAL_REWRITE_FORMAT "map-%x-%x-%X_%X-%x-%x"
-void		CheckPointLogicalRewriteHeap(void);
+extern void CheckPointLogicalRewriteHeap(void);
 
 #endif							/* REWRITE_HEAP_H */
