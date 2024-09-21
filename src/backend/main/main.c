@@ -67,6 +67,7 @@ main(int argc, char *argv[])
 	pgwin32_install_crashdump_handler();
 #endif
 
+	/*取程序名称*/
 	progname = get_progname(argv[0]);
 
 	/*
@@ -144,11 +145,13 @@ main(int argc, char *argv[])
 	{
 		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
 		{
+		    /*显示帮助信息*/
 			help(progname);
 			exit(0);
 		}
 		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
 		{
+		    /*显示版本号*/
 			fputs(PG_BACKEND_VERSIONSTR, stdout);
 			exit(0);
 		}
@@ -164,8 +167,10 @@ main(int argc, char *argv[])
 		 * switch as being the postmaster/postgres one.
 		 */
 		if (strcmp(argv[1], "--describe-config") == 0)
+		    /*不检查root*/
 			do_check_root = false;
 		else if (argc > 2 && strcmp(argv[1], "-C") == 0)
+		    /*不检查root*/
 			do_check_root = false;
 	}
 
@@ -174,6 +179,7 @@ main(int argc, char *argv[])
 	 * option.
 	 */
 	if (do_check_root)
+	    /*检查root*/
 		check_root(progname);
 
 	/*
@@ -194,6 +200,7 @@ main(int argc, char *argv[])
 		PostgresSingleUserMain(argc, argv,
 							   strdup(get_user_name_or_exit(progname)));
 	else
+	    /*默认入口*/
 		PostmasterMain(argc, argv);
 	/* the functions above should not return */
 	abort();
@@ -388,6 +395,7 @@ check_root(const char *progname)
 #ifndef WIN32
 	if (geteuid() == 0)
 	{
+	    /*不容许以root用户来执行postgresql*/
 		write_stderr("\"root\" execution of the PostgreSQL server is not permitted.\n"
 					 "The server must be started under an unprivileged user ID to prevent\n"
 					 "possible system security compromise.  See the documentation for\n"
@@ -405,6 +413,7 @@ check_root(const char *progname)
 	 */
 	if (getuid() != geteuid())
 	{
+	    /*不得提升权限*/
 		write_stderr("%s: real and effective user IDs must match\n",
 					 progname);
 		exit(1);

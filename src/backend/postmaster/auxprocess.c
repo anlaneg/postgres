@@ -138,6 +138,7 @@ AuxiliaryProcessMain(AuxProcType auxtype)
 	switch (MyAuxProcType)
 	{
 		case StartupProcess:
+		    /*start up 进程入口*/
 			StartupProcessMain();
 			proc_exit(1);
 
@@ -146,6 +147,7 @@ AuxiliaryProcessMain(AuxProcType auxtype)
 			proc_exit(1);
 
 		case BgWriterProcess:
+		    /*bg write进程入口*/
 			BackgroundWriterMain();
 			proc_exit(1);
 

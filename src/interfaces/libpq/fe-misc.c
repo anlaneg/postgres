@@ -960,6 +960,7 @@ pqFlush(PGconn *conn)
 		if (conn->Pfdebug)
 			fflush(conn->Pfdebug);
 
+		/*发送output buffer中的内容*/
 		return pqSendSome(conn, conn->outCount);
 	}
 

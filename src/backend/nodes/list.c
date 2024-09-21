@@ -340,10 +340,12 @@ lappend(List *list, void *datum)
 	Assert(IsPointerList(list));
 
 	if (list == NIL)
+	    /*新建list*/
 		list = new_list(T_List, 1);
 	else
 		new_tail_cell(list);
 
+	/*填充最一个节点*/
 	llast(list) = datum;
 	check_list_invariants(list);
 	return list;

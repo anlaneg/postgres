@@ -3521,18 +3521,23 @@ RemoveTempXlogFiles(void)
 
 	elog(DEBUG2, "removing all temporary WAL segments");
 
+	/*打开目录，创建对应的xldir*/
 	xldir = AllocateDir(XLOGDIR);
 	while ((xlde = ReadDir(xldir, XLOGDIR)) != NULL)
 	{
 		char		path[MAXPGPATH];
 
 		if (strncmp(xlde->d_name, "xlogtemp.", 9) != 0)
+		    /*忽略非temp文件*/
 			continue;
 
+		/*针对此temp文件，构造路径，并移除path*/
 		snprintf(path, MAXPGPATH, XLOGDIR "/%s", xlde->d_name);
 		unlink(path);
 		elog(DEBUG2, "removed temporary WAL segment \"%s\"", path);
 	}
+
+	/*关闭目录*/
 	FreeDir(xldir);
 }
 
@@ -3789,6 +3794,7 @@ ValidateXLOGDirectoryStructure(void)
 	/* Check for pg_wal; if it doesn't exist, error out */
 	if (stat(XLOGDIR, &stat_buf) != 0 ||
 		!S_ISDIR(stat_buf.st_mode))
+	    /*pg_wal目录不存在*/
 		ereport(FATAL,
 				(errmsg("required WAL directory \"%s\" does not exist",
 						XLOGDIR)));
@@ -3799,12 +3805,14 @@ ValidateXLOGDirectoryStructure(void)
 	{
 		/* Check for weird cases where it exists but isn't a directory */
 		if (!S_ISDIR(stat_buf.st_mode))
+		    /*archive_status文件存在，但其不为目录*/
 			ereport(FATAL,
 					(errmsg("required WAL directory \"%s\" does not exist",
 							path)));
 	}
 	else
 	{
+	    /*archive_status文件不存在，创建path目录*/
 		ereport(LOG,
 				(errmsg("creating missing WAL directory \"%s\"", path)));
 		if (MakePGDirectory(path) < 0)
@@ -4002,15 +4010,18 @@ ReadControlFile(void)
 	fd = BasicOpenFile(XLOG_CONTROL_FILE,
 					   O_RDWR | PG_BINARY);
 	if (fd < 0)
+	    /*打开control file失败*/
 		ereport(PANIC,
 				(errcode_for_file_access(),
 				 errmsg("could not open file \"%s\": %m",
 						XLOG_CONTROL_FILE)));
 
 	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_READ);
+	/*读取ControlFileData*/
 	r = read(fd, ControlFile, sizeof(ControlFileData));
 	if (r != sizeof(ControlFileData))
 	{
+	    /*读取内容失败*/
 		if (r < 0)
 			ereport(PANIC,
 					(errcode_for_file_access(),
@@ -4034,6 +4045,7 @@ ReadControlFile(void)
 	 */
 
 	if (ControlFile->pg_control_version != PG_CONTROL_VERSION && ControlFile->pg_control_version % 65536 == 0 && ControlFile->pg_control_version / 65536 != 0)
+	    /*兼容检查*/
 		ereport(FATAL,
 				(errmsg("database files are incompatible with server"),
 				 errdetail("The database cluster was initialized with PG_CONTROL_VERSION %d (0x%08x),"
@@ -4054,10 +4066,11 @@ ReadControlFile(void)
 	INIT_CRC32C(crc);
 	COMP_CRC32C(crc,
 				(char *) ControlFile,
-				offsetof(ControlFileData, crc));
+				offsetof(ControlFileData, crc));/*计算crc*/
 	FIN_CRC32C(crc);
 
 	if (!EQ_CRC32C(crc, ControlFile->crc))
+	    /*crc不一致*/
 		ereport(FATAL,
 				(errmsg("incorrect checksum in control file")));
 
@@ -4322,7 +4335,7 @@ LocalProcessControlFile(bool reset)
 {
 	Assert(reset || ControlFile == NULL);
 	ControlFile = palloc(sizeof(ControlFileData));
-	ReadControlFile();
+	ReadControlFile();/*读取control file并填充ControlFile结构体，并校验*/
 }
 
 /*
@@ -4518,6 +4531,7 @@ BootStrapXLOG(void)
 	 * perhaps be useful sometimes.
 	 */
 	gettimeofday(&tv, NULL);
+	/*生成系统id*/
 	sysidentifier = ((uint64) tv.tv_sec) << 32;
 	sysidentifier |= ((uint64) tv.tv_usec) << 12;
 	sysidentifier |= getpid() & 0xFFF;
@@ -4999,7 +5013,9 @@ StartupXLOG(void)
 	if (ControlFile->state != DB_SHUTDOWNED &&
 		ControlFile->state != DB_SHUTDOWNED_IN_RECOVERY)
 	{
+	    /*移除temp文件*/
 		RemoveTempXlogFiles();
+		/*同步数据到磁盘*/
 		SyncDataDirectory();
 		didCrash = true;
 	}

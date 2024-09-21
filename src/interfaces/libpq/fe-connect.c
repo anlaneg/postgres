@@ -657,6 +657,7 @@ PQconnectdbParams(const char *const *keywords,
 				  const char *const *values,
 				  int expand_dbname)
 {
+    /*通过参数创建连接*/
 	PGconn	   *conn = PQconnectStartParams(keywords, values, expand_dbname);
 
 	if (conn && conn->status != CONNECTION_BAD)
@@ -789,6 +790,7 @@ PQconnectStartParams(const char *const *keywords,
 	 */
 	if (!fillPGconn(conn, connOptions))
 	{
+	    /*利用connOptions填充conn失败*/
 		PQconninfoFree(connOptions);
 		return conn;
 	}
@@ -802,6 +804,7 @@ PQconnectStartParams(const char *const *keywords,
 	 * Compute derived options
 	 */
 	if (!connectOptions2(conn))
+	    /*连接校验失败*/
 		return conn;
 
 	/*
@@ -888,12 +891,15 @@ fillPGconn(PGconn *conn, PQconninfoOption *connOptions)
 
 	for (option = PQconninfoOptions; option->keyword; option++)
 	{
+	    /*只填充connect member offset有效的成员*/
 		if (option->connofs >= 0)
 		{
+		    /*取此keyword对应的option*/
 			const char *tmp = conninfo_getval(connOptions, option->keyword);
 
 			if (tmp)
 			{
+			    /*利用tmp填充conn结构体*/
 				char	  **connmember = (char **) ((char *) conn + option->connofs);
 
 				free(*connmember);
@@ -2038,6 +2044,7 @@ connectDBStart(PGconn *conn)
 		return 0;
 
 	if (!conn->options_valid)
+	    /*连接options无效，返回失败*/
 		goto connect_errReturn;
 
 	/*
@@ -2696,6 +2703,7 @@ keep_going:						/* We will come back to here until there is
 					if (connect(conn->sock, addr_cur->ai_addr,
 								addr_cur->ai_addrlen) < 0)
 					{
+					    /*连接到远端失败*/
 						if (SOCK_ERRNO == EINPROGRESS ||
 #ifdef WIN32
 							SOCK_ERRNO == EWOULDBLOCK ||
@@ -3945,6 +3953,7 @@ makeEmptyPGconn(void)
 	WSASetLastError(0);
 #endif							/* WIN32 */
 
+	/*创建连接*/
 	conn = (PGconn *) malloc(sizeof(PGconn));
 	if (conn == NULL)
 		return conn;
@@ -5464,6 +5473,7 @@ conninfo_init(PQExpBuffer errorMessage)
 	}
 	opt_dest = options;
 
+	/*复制PQconninfoOptions到options*/
 	for (cur_opt = PQconninfoOptions; cur_opt->keyword; cur_opt++)
 	{
 		/* Only copy the public part of the struct, not the full internal */
@@ -5490,6 +5500,7 @@ parse_connection_string(const char *connstr, PQExpBuffer errorMessage,
 {
 	/* Parse as URI if connection string matches URI prefix */
 	if (uri_prefix_length(connstr) != 0)
+	    /*自url中解析连接选项*/
 		return conninfo_uri_parse(connstr, errorMessage, use_defaults);
 
 	/* Parse as default otherwise */
@@ -5509,10 +5520,12 @@ uri_prefix_length(const char *connstr)
 {
 	if (strncmp(connstr, uri_designator,
 				sizeof(uri_designator) - 1) == 0)
+	    /*前缀匹配成功，返回前缀长度*/
 		return sizeof(uri_designator) - 1;
 
 	if (strncmp(connstr, short_uri_designator,
 				sizeof(short_uri_designator) - 1) == 0)
+	    /*返回前缀长度*/
 		return sizeof(short_uri_designator) - 1;
 
 	return 0;
@@ -5530,6 +5543,7 @@ uri_prefix_length(const char *connstr)
 static bool
 recognized_connection_string(const char *connstr)
 {
+    /*是否字符串为connect string,如果它的前缀长度不为0，或者它包含connstr*/
 	return uri_prefix_length(connstr) != 0 || strchr(connstr, '=') != NULL;
 }
 
@@ -5718,7 +5732,7 @@ conninfo_parse(const char *conninfo, PQExpBuffer errorMessage,
  */
 static PQconninfoOption *
 conninfo_array_parse(const char *const *keywords, const char *const *values,
-					 PQExpBuffer errorMessage, bool use_defaults,
+					 PQExpBuffer errorMessage, bool use_defaults/*容许添加默认值*/,
 					 int expand_dbname)
 {
 	PQconninfoOption *options;
@@ -5732,10 +5746,13 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 	 */
 	while (expand_dbname && keywords[i])
 	{
+	    /*参数名称*/
 		const char *pname = keywords[i];
+		/*参数值*/
 		const char *pvalue = values[i];
 
 		/* first find "dbname" if any */
+		/*当前只考虑dbname*/
 		if (strcmp(pname, "dbname") == 0 && pvalue)
 		{
 			/*
@@ -5745,6 +5762,7 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 			 */
 			if (recognized_connection_string(pvalue))
 			{
+			    /*pvalue是一个connect字符串，从其中解析出dbname_options*/
 				dbname_options = parse_connection_string(pvalue, errorMessage, false);
 				if (dbname_options == NULL)
 					return NULL;
@@ -5758,6 +5776,7 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 	options = conninfo_init(errorMessage);
 	if (options == NULL)
 	{
+	    /*构造PQconninfoOptions副本失败*/
 		PQconninfoFree(dbname_options);
 		return NULL;
 	}
@@ -5766,7 +5785,9 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 	i = 0;
 	while (keywords[i])
 	{
+	    /*参数名称*/
 		const char *pname = keywords[i];
+		/*参数值*/
 		const char *pvalue = values[i];
 
 		if (pvalue != NULL && pvalue[0] != '\0')
@@ -5775,12 +5796,14 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 			for (option = options; option->keyword != NULL; option++)
 			{
 				if (strcmp(option->keyword, pname) == 0)
+				    /*此pname是需要设置的，跳出*/
 					break;
 			}
 
 			/* Check for invalid connection option */
 			if (option->keyword == NULL)
 			{
+			    /*遇到不认识/不需要的keyword，配置失败*/
 				appendPQExpBuffer(errorMessage,
 								  libpq_gettext("invalid connection option \"%s\"\n"),
 								  pname);
@@ -5809,6 +5832,7 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 							if (strcmp(options[k].keyword, str_option->keyword) == 0)
 							{
 								free(options[k].val);
+								/*设置options*/
 								options[k].val = strdup(str_option->val);
 								if (!options[k].val)
 								{
@@ -5836,10 +5860,14 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 				/*
 				 * Store the value, overriding previous settings
 				 */
-				free(option->val);
+				if (option->val)
+				    /*先释放旧的value*/
+					free(option->val);
+				/*再填充新设置的值*/
 				option->val = strdup(pvalue);
 				if (!option->val)
 				{
+				    /*复制字符串失败，失败返回*/
 					appendPQExpBufferStr(errorMessage,
 										 libpq_gettext("out of memory\n"));
 					PQconninfoFree(options);
@@ -5857,6 +5885,7 @@ conninfo_array_parse(const char *const *keywords, const char *const *values,
 	 */
 	if (use_defaults)
 	{
+	    /*使未设置的选项，使用默认值*/
 		if (!conninfo_add_defaults(options, errorMessage))
 		{
 			PQconninfoFree(options);
@@ -5899,6 +5928,7 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 	for (option = options; option->keyword != NULL; option++)
 	{
 		if (option->val != NULL)
+		    /*跳过已设置的options*/
 			continue;			/* Value was in conninfo or service */
 
 		/*
@@ -5906,6 +5936,7 @@ conninfo_add_defaults(PQconninfoOption *options, PQExpBuffer errorMessage)
 		 */
 		if (option->envvar != NULL)
 		{
+		    /*从环境变量中读取，并设置选项的值*/
 			if ((tmp = getenv(option->envvar)) != NULL)
 			{
 				option->val = strdup(tmp);
@@ -6509,7 +6540,7 @@ conninfo_getval(PQconninfoOption *connOptions,
 
 	option = conninfo_find(connOptions, keyword);
 
-	return option ? option->val : NULL;
+	return option ? option->val/*返回keyword对应的value*/ : NULL;
 }
 
 /*
@@ -6596,6 +6627,7 @@ conninfo_find(PQconninfoOption *connOptions, const char *keyword)
 {
 	PQconninfoOption *option;
 
+	/*给定keyword,获取其对应的PQconninfoOption*/
 	for (option = connOptions; option->keyword != NULL; option++)
 	{
 		if (strcmp(option->keyword, keyword) == 0)
@@ -6767,6 +6799,7 @@ PQoptions(const PGconn *conn)
 	return conn->pgoptions;
 }
 
+/*取连接状态*/
 ConnStatusType
 PQstatus(const PGconn *conn)
 {

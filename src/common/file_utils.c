@@ -430,6 +430,7 @@ get_dirent_type(const char *path,
 
 	if (result == PGFILETYPE_UNKNOWN)
 	{
+	    /*文件类型未知，通过stat来检查*/
 		struct stat fst;
 		int			sret;
 
@@ -458,5 +459,6 @@ get_dirent_type(const char *path,
 			result = PGFILETYPE_LNK;
 	}
 
+	/*返回文件类型，例如目录，普通文件，link*/
 	return result;
 }

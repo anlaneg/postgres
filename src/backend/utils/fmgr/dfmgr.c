@@ -53,13 +53,16 @@ typedef struct
 
 typedef struct df_files
 {
+    /*用于串连动态库*/
 	struct df_files *next;		/* List link */
 	dev_t		device;			/* Device file is on */
 #ifndef WIN32					/* ensures we never again depend on this under
 								 * win32 */
 	ino_t		inode;			/* Inode number of file */
 #endif
+	/*动态库的handle*/
 	void	   *handle;			/* a handle for pg_dl* functions */
+	/*动态库名称*/
 	char		filename[FLEXIBLE_ARRAY_MEMBER];	/* Full pathname of file */
 } DynamicFileList;
 
@@ -147,6 +150,7 @@ load_file(const char *filename, bool restricted)
 
 	/* Apply security restriction if requested */
 	if (restricted)
+	    /*检查是否为合法的library*/
 		check_restricted_library_name(filename);
 
 	/* Expand the possibly-abbreviated filename to an exact path name */
@@ -181,7 +185,7 @@ lookup_external_function(void *filehandle, const char *funcname)
  * perhaps other things that are definitely unsafe currently.
  */
 static void *
-internal_load_library(const char *libname)
+internal_load_library(const char *libname/*要加载的lib name*/)
 {
 	DynamicFileList *file_scanner;
 	PGModuleMagicFunction magic_func;
@@ -236,6 +240,7 @@ internal_load_library(const char *libname)
 #endif
 		file_scanner->next = NULL;
 
+		/*加载library*/
 		file_scanner->handle = dlopen(file_scanner->filename, RTLD_NOW | RTLD_GLOBAL);
 		if (file_scanner->handle == NULL)
 		{
@@ -253,6 +258,7 @@ internal_load_library(const char *libname)
 			dlsym(file_scanner->handle, PG_MAGIC_FUNCTION_NAME_STRING);
 		if (magic_func)
 		{
+		    /*调用magic func,返回magic data*/
 			const Pg_magic_struct *magic_data_ptr = (*magic_func) ();
 
 			if (magic_data_ptr->len != magic_data.len ||
@@ -271,6 +277,7 @@ internal_load_library(const char *libname)
 		}
 		else
 		{
+		    /*不合乎规汇聚，关闭这个library*/
 			/* try to close library */
 			dlclose(file_scanner->handle);
 			free((char *) file_scanner);
@@ -286,12 +293,15 @@ internal_load_library(const char *libname)
 		 */
 		PG_init = (PG_init_t) dlsym(file_scanner->handle, "_PG_init");
 		if (PG_init)
+		    /*如果有_PG_init函数，则执行初始化*/
 			(*PG_init) ();
 
 		/* OK to link it into list */
 		if (file_list == NULL)
+		    /*首个元素，加入链表头*/
 			file_list = file_scanner;
 		else
+		    /*将自身串入list*/
 			file_tail->next = file_scanner;
 		file_tail = file_scanner;
 	}

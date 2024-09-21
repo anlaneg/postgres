@@ -498,6 +498,7 @@ start_postmaster(void)
 		cmd = psprintf("exec \"%s\" %s%s < \"%s\" 2>&1",
 					   exec_path, pgdata_opt, post_opts, DEVNULL);
 
+	/*执行cmd对应的命令及参数*/
 	(void) execl("/bin/sh", "/bin/sh", "-c", cmd, (char *) NULL);
 
 	/* exec failed */
@@ -944,6 +945,7 @@ do_start(void)
 	if (ctl_command == RESTART_COMMAND || pgdata_opt == NULL)
 		pgdata_opt = "";
 
+	/*查找postgres可执行文件，并执行*/
 	if (exec_path == NULL)
 		exec_path = find_other_exec_or_die(argv0, "postgres", PG_BACKEND_VERSIONSTR);
 

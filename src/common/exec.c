@@ -103,6 +103,7 @@ validate_exec(const char *path)
 	 * instead of the underlying file, you lose.
 	 */
 	if (stat(path, &buf) < 0)
+	    /*path不存在*/
 		return -1;
 
 	if (!S_ISREG(buf.st_mode))
@@ -114,6 +115,7 @@ validate_exec(const char *path)
 		 * horribly off base.
 		 */
 		errno = S_ISDIR(buf.st_mode) ? EISDIR : EPERM;
+	    	/*非普通文件*/
 		return -1;
 	}
 
@@ -130,7 +132,7 @@ validate_exec(const char *path)
 	is_x = buf.st_mode & S_IXUSR;
 	errno = EACCES;				/* appropriate thing if we return nonzero */
 #endif
-	return is_x ? (is_r ? 0 : -2) : -1;
+	return is_x ? (is_r ? 0 /*可读可执行*/: -2/*可读不可执行*/) : -1/*不可读不可执行*/;
 }
 
 
@@ -157,6 +159,7 @@ find_my_exec(const char *argv0, char *retpath)
 
 	if (!getcwd(cwd, MAXPGPATH))
 	{
+	    /*取当前工作目录失败，报错*/
 		log_error(errcode_for_file_access(),
 				  _("could not identify current directory: %m"));
 		return -1;
@@ -168,12 +171,15 @@ find_my_exec(const char *argv0, char *retpath)
 	if (first_dir_separator(argv0) != NULL)
 	{
 		if (is_absolute_path(argv0))
+		    /*argv0采用的是绝对路径，填充retpath*/
 			strlcpy(retpath, argv0, MAXPGPATH);
 		else
+		    /*cmd + argv0合并绝对地址*/
 			join_path_components(retpath, cwd, argv0);
 		canonicalize_path(retpath);
 
 		if (validate_exec(retpath) == 0)
+		    /*retpath存在，可读可执行，检查是否软链接*/
 			return resolve_symlinks(retpath);
 
 		log_error(errcode(ERRCODE_WRONG_OBJECT_TYPE),
@@ -480,6 +486,7 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 		 */
 	}
 
+	/*取argv0对应的path*/
 	if (find_my_exec(argv0, my_exec_path) < 0)
 		return;
 
@@ -493,6 +500,7 @@ set_pglocale_pgservice(const char *argv0, const char *app)
 
 	if (getenv("PGSYSCONFDIR") == NULL)
 	{
+	    /*未配置PGSYSCONFDIR，设置它*/
 		get_etc_path(my_exec_path, path);
 		/* set for libpq to use */
 		setenv("PGSYSCONFDIR", path, 0);

@@ -90,6 +90,7 @@ static XLogRecPtr last_snapshot_lsn = InvalidXLogRecPtr;
 void
 BackgroundWriterMain(void)
 {
+    /*bgwrite进程的入口*/
 	sigjmp_buf	local_sigjmp_buf;
 	MemoryContext bgwriter_context;
 	bool		prev_hibernate;

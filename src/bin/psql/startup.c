@@ -251,24 +251,26 @@ main(int argc, char *argv[])
 		const char **values = pg_malloc(PARAMS_ARRAY_SIZE * sizeof(*values));
 
 		keywords[0] = "host";
-		values[0] = options.host;
+		values[0] = options.host;/*主机值*/
 		keywords[1] = "port";
-		values[1] = options.port;
+		values[1] = options.port;/*端口值*/
 		keywords[2] = "user";
-		values[2] = options.username;
+		values[2] = options.username;/*用户名称*/
 		keywords[3] = "password";
-		values[3] = password;
+		values[3] = password;/*用户密码*/
 		keywords[4] = "dbname"; /* see do_connect() */
 		values[4] = (options.list_dbs && options.dbname == NULL) ?
-			"postgres" : options.dbname;
+			"postgres" : options.dbname;/*数据库名称，可以为空，此时数据库为postgres*/
 		keywords[5] = "fallback_application_name";
-		values[5] = pset.progname;
+		values[5] = pset.progname;/*????*/
 		keywords[6] = "client_encoding";
+		/*client编码方式*/
 		values[6] = (pset.notty || getenv("PGCLIENTENCODING")) ? NULL : "auto";
 		keywords[7] = NULL;
 		values[7] = NULL;
 
 		new_pass = false;
+		/*建立到db的连接*/
 		pset.db = PQconnectdbParams(keywords, values, true);
 		free(keywords);
 		free(values);
@@ -360,6 +362,7 @@ main(int argc, char *argv[])
 
 		if (options.single_txn)
 		{
+		    /*指明开始事务*/
 			if ((res = PSQLexec("BEGIN")) == NULL)
 			{
 				if (pset.on_error_stop)
@@ -529,7 +532,7 @@ parse_psql_options(int argc, char *argv[], struct adhoc_opts *options)
 	memset(options, 0, sizeof *options);
 
 	while ((c = getopt_long(argc, argv, "aAbc:d:eEf:F:h:HlL:no:p:P:qR:sStT:U:v:VwWxXz?01",
-							long_options, &optindex)) != -1)
+							long_options/*长选项*/, &optindex)) != -1)
 	{
 		switch (c)
 		{

@@ -4477,7 +4477,7 @@ static struct config_string ConfigureNamesString[] =
 			NULL,
 			GUC_SUPERUSER_ONLY | GUC_DISALLOW_IN_AUTO_FILE
 		},
-		&data_directory,
+		&data_directory,/*数据传对应的目录*/
 		NULL,
 		NULL, NULL, NULL
 	},

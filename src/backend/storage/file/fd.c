@@ -250,7 +250,7 @@ typedef enum
 
 typedef struct
 {
-	AllocateDescKind kind;
+	AllocateDescKind kind;/*采用哪个union成员*/
 	SubTransactionId create_subid;
 	union
 	{
@@ -534,6 +534,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 		/* mmap() needs actual length if we want to map whole file */
 		if (offset == 0 && nbytes == 0)
 		{
+		    /*跳到文件结尾，获取文件大小*/
 			nbytes = lseek(fd, 0, SEEK_END);
 			if (nbytes < 0)
 			{
@@ -552,10 +553,12 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 
 		/* fetch pagesize only once */
 		if (pagesize == 0)
+		    /*取页大小*/
 			pagesize = sysconf(_SC_PAGESIZE);
 
 		/* align length to pagesize, dropping any fractional page */
 		if (pagesize > 0)
+		    /*文件大小向上对齐到页后大小*/
 			nbytes = (nbytes / pagesize) * pagesize;
 
 		/* fractional-page request is a no-op */
@@ -568,6 +571,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 		 * through to the next implementation.
 		 */
 		if (nbytes <= (off_t) SSIZE_MAX)
+		    /*将文件内容映射到内存*/
 			p = mmap(NULL, nbytes, PROT_READ, MAP_SHARED, fd, offset);
 		else
 			p = MAP_FAILED;
@@ -576,6 +580,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 		{
 			int			rc;
 
+			/*执行内存同步*/
 			rc = msync(p, (size_t) nbytes, MS_ASYNC);
 			if (rc != 0)
 			{
@@ -585,6 +590,7 @@ pg_flush_data(int fd, off_t offset, off_t nbytes)
 				/* NB: need to fall through to munmap()! */
 			}
 
+			/*解除map*/
 			rc = munmap(p, (size_t) nbytes);
 			if (rc != 0)
 			{
@@ -868,7 +874,7 @@ InitTemporaryFileAccess(void)
  * since then one risks loss of error messages from, e.g., libc.
  */
 static void
-count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
+count_usable_fds(int max_to_probe/*最大需探测的fd*/, int *usable_fds/*可供使用的fd*/, int *already_open/*出参，当前已打开的fd*/)
 {
 	int		   *fd;
 	int			size;
@@ -925,11 +931,13 @@ count_usable_fds(int max_to_probe, int *usable_fds, int *already_open)
 			highestfd = thisfd;
 
 		if (used >= max_to_probe)
+		    /*在用的fd,被需要探测的多，跳出*/
 			break;
 	}
 
 	/* release the files we opened */
 	for (j = 0; j < used; j++)
+	    /*关闭探测用的fd*/
 		close(fd[j]);
 
 	pfree(fd);
@@ -964,17 +972,19 @@ set_max_safe_fds(void)
 	count_usable_fds(max_files_per_process,
 					 &usable_fds, &already_open);
 
+	/*可安全使用的fd*/
 	max_safe_fds = Min(usable_fds, max_files_per_process - already_open);
 
 	/*
 	 * Take off the FDs reserved for system() etc.
 	 */
-	max_safe_fds -= NUM_RESERVED_FDS;
+	max_safe_fds -= NUM_RESERVED_FDS;/*预留的fd,防止部分库函数需要使用*/
 
 	/*
 	 * Make sure we still have enough to get by.
 	 */
 	if (max_safe_fds < FD_MINFREE)
+	    /*可用的fd 过少*/
 		ereport(FATAL,
 				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 				 errmsg("insufficient file descriptors available to start server process"),
@@ -1043,6 +1053,7 @@ tryAgain:
 					 "PG_O_DIRECT value collides with O_DSYNC");
 #endif
 
+	/*以非direct方式打开文件*/
 	fd = open(fileName, fileFlags & ~PG_O_DIRECT, fileMode);
 #else
 	fd = open(fileName, fileFlags, fileMode);
@@ -2313,6 +2324,7 @@ reserveAllocatedDesc(void)
 
 	/* Quick out if array already has a free slot. */
 	if (numAllocatedDescs < maxAllocatedDescs)
+	    /*有空闲的slot,不必增加*/
 		return true;
 
 	/*
@@ -2323,6 +2335,7 @@ reserveAllocatedDesc(void)
 	 */
 	if (allocatedDescs == NULL)
 	{
+	    /*初次申请，选申请newMax*/
 		newMax = FD_MINFREE / 3;
 		newDescs = (AllocateDesc *) malloc(newMax * sizeof(AllocateDesc));
 		/* Out of memory already?  Treat as fatal error. */
@@ -2349,6 +2362,7 @@ reserveAllocatedDesc(void)
 	newMax = max_safe_fds / 3;
 	if (newMax > maxAllocatedDescs)
 	{
+	    /*扩充allocatedDescs*/
 		newDescs = (AllocateDesc *) realloc(allocatedDescs,
 											newMax * sizeof(AllocateDesc));
 		/* Treat out-of-memory as a non-fatal error. */
@@ -2399,6 +2413,7 @@ AllocateFile(const char *name, const char *mode)
 	ReleaseLruFiles();
 
 TryAgain:
+    /*打开文件name*/
 	if ((file = fopen(name, mode)) != NULL)
 	{
 		AllocateDesc *desc = &allocatedDescs[numAllocatedDescs];
@@ -2412,6 +2427,7 @@ TryAgain:
 
 	if (errno == EMFILE || errno == ENFILE)
 	{
+	    /*文件打开过多*/
 		int			save_errno = errno;
 
 		ereport(LOG,
@@ -2457,10 +2473,12 @@ OpenTransientFilePerm(const char *fileName, int fileFlags, mode_t fileMode)
 	/* Close excess kernel FDs. */
 	ReleaseLruFiles();
 
+	/*打开此文件*/
 	fd = BasicOpenFilePerm(fileName, fileFlags, fileMode);
 
 	if (fd >= 0)
 	{
+	    /*填充desc*/
 		AllocateDesc *desc = &allocatedDescs[numAllocatedDescs];
 
 		desc->kind = AllocateDescRawFD;
@@ -2660,17 +2678,20 @@ AllocateDir(const char *dirname)
 	ReleaseLruFiles();
 
 TryAgain:
+    /*打开指定目录$dirname*/
 	if ((dir = opendir(dirname)) != NULL)
 	{
+	    /*打开成功，返回一个desc*/
 		AllocateDesc *desc = &allocatedDescs[numAllocatedDescs];
 
 		desc->kind = AllocateDescDir;
-		desc->desc.dir = dir;
+		desc->desc.dir = dir;/*此目录对应的DIR*/
 		desc->create_subid = GetCurrentSubTransactionId();
 		numAllocatedDescs++;
 		return desc->desc.dir;
 	}
 
+	/*打开目录失败，关闭文件后再试*/
 	if (errno == EMFILE || errno == ENFILE)
 	{
 		int			save_errno = errno;
@@ -2710,6 +2731,7 @@ TryAgain:
 struct dirent *
 ReadDir(DIR *dir, const char *dirname)
 {
+    /*取目录dir中的一个目录成员项*/
 	return ReadDirExtended(dir, dirname, ERROR);
 }
 
@@ -2730,6 +2752,7 @@ ReadDirExtended(DIR *dir, const char *dirname, int elevel)
 	/* Give a generic message for AllocateDir failure, if caller didn't */
 	if (dir == NULL)
 	{
+	    /*参数有误*/
 		ereport(elevel,
 				(errcode_for_file_access(),
 				 errmsg("could not open directory \"%s\": %m",
@@ -2739,6 +2762,7 @@ ReadDirExtended(DIR *dir, const char *dirname, int elevel)
 
 	errno = 0;
 	if ((dent = readdir(dir)) != NULL)
+	    /*取一个目录成员项*/
 		return dent;
 
 	if (errno)
@@ -2782,6 +2806,7 @@ FreeDir(DIR *dir)
 	/* Only get here if someone passes us a dir not in allocatedDescs */
 	elog(WARNING, "dir passed to FreeDir was not obtained from AllocateDir");
 
+	/*关闭此目录*/
 	return closedir(dir);
 }
 
@@ -3367,11 +3392,13 @@ SyncDataDirectory(void)
 		struct stat st;
 
 		if (lstat("pg_wal", &st) < 0)
+		    /*文件不存在，报错*/
 			ereport(LOG,
 					(errcode_for_file_access(),
 					 errmsg("could not stat file \"%s\": %m",
 							"pg_wal")));
 		else if (S_ISLNK(st.st_mode))
+		    /*pg_wal为link*/
 			xlog_is_symlink = true;
 	}
 
@@ -3425,6 +3452,7 @@ SyncDataDirectory(void)
 	 */
 	walkdir(".", pre_sync_fname, false, DEBUG1);
 	if (xlog_is_symlink)
+	    /*pg_wal为link,遍历执行pre_sync*/
 		walkdir("pg_wal", pre_sync_fname, false, DEBUG1);
 	walkdir("pg_tblspc", pre_sync_fname, true, DEBUG1);
 #endif
@@ -3464,15 +3492,17 @@ SyncDataDirectory(void)
  */
 static void
 walkdir(const char *path,
-		void (*action) (const char *fname, bool isdir, int elevel),
+		void (*action/*成员项通过此回调访问*/) (const char *fname, bool isdir, int elevel),
 		bool process_symlinks,
 		int elevel)
 {
 	DIR		   *dir;
 	struct dirent *de;
 
+	/*打开$path对应的目录*/
 	dir = AllocateDir(path);
 
+	/*遍历$dir中所有的目录成员项*/
 	while ((de = ReadDirExtended(dir, path, elevel)) != NULL)
 	{
 		char		subpath[MAXPGPATH * 2];
@@ -3481,16 +3511,21 @@ walkdir(const char *path,
 
 		if (strcmp(de->d_name, ".") == 0 ||
 			strcmp(de->d_name, "..") == 0)
+		    /*跳过 self,parent两个目录*/
 			continue;
 
+		/*成员路径*/
 		snprintf(subpath, sizeof(subpath), "%s/%s", path, de->d_name);
 
+		/*取此目录成员项的类型*/
 		switch (get_dirent_type(subpath, de, process_symlinks, elevel))
 		{
 			case PGFILETYPE_REG:
+			    /*普通文件，调用action回调*/
 				(*action) (subpath, false, elevel);
 				break;
 			case PGFILETYPE_DIR:
+			    /*递归访问目录下成员*/
 				walkdir(subpath, action, false, elevel);
 				break;
 			default:
@@ -3513,6 +3548,7 @@ walkdir(const char *path,
 	 * might not be robust against that.
 	 */
 	if (dir)
+	    /*此目录下所有目录项均已访问完成，调用action回调*/
 		(*action) (path, true, elevel);
 }
 
@@ -3532,11 +3568,13 @@ pre_sync_fname(const char *fname, bool isdir, int elevel)
 
 	/* Don't try to flush directories, it'll likely just fail */
 	if (isdir)
+	    /*针对目录，直接返回*/
 		return;
 
 	ereport_startup_progress("syncing data directory (pre-fsync), elapsed time: %ld.%02d s, current path: %s",
 							 fname);
 
+	/*打开此文件*/
 	fd = OpenTransientFile(fname, O_RDONLY | PG_BINARY);
 
 	if (fd < 0)
@@ -3553,8 +3591,9 @@ pre_sync_fname(const char *fname, bool isdir, int elevel)
 	 * pg_flush_data() ignores errors, which is ok because this is only a
 	 * hint.
 	 */
-	pg_flush_data(fd, 0, 0);
+	pg_flush_data(fd, 0, 0);/*刷数据*/
 
+	/*关闭此文件*/
 	if (CloseTransientFile(fd) != 0)
 		ereport(elevel,
 				(errcode_for_file_access(),
@@ -3620,6 +3659,7 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 	else
 		flags |= O_RDONLY;
 
+	/*打开文件*/
 	fd = OpenTransientFile(fname, flags);
 
 	/*
@@ -3639,6 +3679,7 @@ fsync_fname_ext(const char *fname, bool isdir, bool ignore_perm, int elevel)
 		return -1;
 	}
 
+	/*执行fsync*/
 	returncode = pg_fsync(fd);
 
 	/*
@@ -3720,6 +3761,7 @@ fsync_parent_path(const char *fname, int elevel)
 int
 MakePGDirectory(const char *directoryName)
 {
+    /*创建目录$directoryName*/
 	return mkdir(directoryName, pg_dir_create_mode);
 }
 

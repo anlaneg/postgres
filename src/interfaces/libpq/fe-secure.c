@@ -376,6 +376,7 @@ retry_masked:
 
 	DISABLE_SIGPIPE(conn, spinfo, return -1);
 
+	/*向对端发送内容*/
 	n = send(conn->sock, ptr, len, flags);
 
 	if (n < 0)

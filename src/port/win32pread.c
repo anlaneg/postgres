@@ -17,7 +17,7 @@
 #include <windows.h>
 
 ssize_t
-pread(int fd, void *buf, size_t size, off_t offset)
+pread(int fd, void *buf/*要填充的buffer*/, size_t size/*可填充的buffer size*/, off_t offset/*要读取的位置*/)
 {
 	OVERLAPPED	overlapped = {0};
 	HANDLE		handle;

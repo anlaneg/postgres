@@ -176,6 +176,7 @@ static const datetkn datetktbl[] = {
 	{YESTERDAY, RESERV, DTK_YESTERDAY}	/* yesterday midnight */
 };
 
+/*datetktbl数组长度*/
 static const int szdatetktbl = sizeof datetktbl / sizeof datetktbl[0];
 
 /*
@@ -4692,7 +4693,7 @@ EncodeInterval(struct pg_itm *itm, int style, char *str)
  * once too often.  Arrange to check them during postmaster start.
  */
 static bool
-CheckDateTokenTable(const char *tablename, const datetkn *base, int nel)
+CheckDateTokenTable(const char *tablename, const datetkn *base, int nel/*base数组长度*/)
 {
 	bool		ok = true;
 	int			i;
@@ -4702,6 +4703,7 @@ CheckDateTokenTable(const char *tablename, const datetkn *base, int nel)
 		/* check for token strings that don't fit */
 		if (strlen(base[i].token) > TOKMAXLEN)
 		{
+		    /*token长度过长，校验不通过*/
 			/* %.*s is safe since all our tokens are ASCII */
 			elog(LOG, "token too long in %s table: \"%.*s\"",
 				 tablename,
@@ -4713,6 +4715,7 @@ CheckDateTokenTable(const char *tablename, const datetkn *base, int nel)
 		if (i > 0 &&
 			strcmp(base[i - 1].token, base[i].token) >= 0)
 		{
+		    /*数组没有按字符序，从小到大排列*/
 			elog(LOG, "ordering error in %s table: \"%s\" >= \"%s\"",
 				 tablename,
 				 base[i - 1].token,
@@ -4731,6 +4734,7 @@ CheckDateTokenTables(void)
 	Assert(UNIX_EPOCH_JDATE == date2j(1970, 1, 1));
 	Assert(POSTGRES_EPOCH_JDATE == date2j(2000, 1, 1));
 
+	/*检查datetktbl,deltatktbl*/
 	ok &= CheckDateTokenTable("datetktbl", datetktbl, szdatetktbl);
 	ok &= CheckDateTokenTable("deltatktbl", deltatktbl, szdeltatktbl);
 	return ok;

@@ -558,6 +558,7 @@ PSQLexec(const char *query)
 
 	if (!pset.db)
 	{
+	    /*没有连接到db，报错返回*/
 		pg_log_error("You are currently not connected to a database.");
 		return NULL;
 	}

@@ -1082,6 +1082,7 @@ palloc(Size size)
 	ret = context->methods->alloc(context, size);
 	if (unlikely(ret == NULL))
 	{
+	    /*alloc内存失败*/
 		MemoryContextStats(TopMemoryContext);
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -1147,6 +1148,7 @@ palloc_extended(Size size, int flags)
 	ret = context->methods->alloc(context, size);
 	if (unlikely(ret == NULL))
 	{
+	    /*申请失败*/
 		if ((flags & MCXT_ALLOC_NO_OOM) == 0)
 		{
 			MemoryContextStats(TopMemoryContext);

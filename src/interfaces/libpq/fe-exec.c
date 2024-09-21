@@ -1430,7 +1430,7 @@ PQsendQueryContinue(PGconn *conn, const char *query)
 }
 
 static int
-PQsendQueryInternal(PGconn *conn, const char *query, bool newQuery)
+PQsendQueryInternal(PGconn *conn, const char *query/*查询sql语句*/, bool newQuery)
 {
 	PGcmdQueueEntry *entry = NULL;
 	PGcmdQueueEntry *entry2 = NULL;
@@ -2316,7 +2316,7 @@ PQexec(PGconn *conn, const char *query)
 {
 	if (!PQexecStart(conn))
 		return NULL;
-	if (!PQsendQuery(conn, query))
+	if (!PQsendQuery(conn, query/*查询sql语句*/))
 		return NULL;
 	return PQexecFinish(conn);
 }

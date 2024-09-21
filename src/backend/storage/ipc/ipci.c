@@ -331,7 +331,7 @@ InitializeShmemGUCs(void)
 	/*
 	 * Calculate the shared memory size and round up to the nearest megabyte.
 	 */
-	size_b = CalculateShmemSize(NULL);
+	size_b = CalculateShmemSize(NULL);/*共享内存大小*/
 	size_mb = add_size(size_b, (1024 * 1024) - 1) / (1024 * 1024);
 	sprintf(buf, "%zu", size_mb);
 	SetConfigOption("shared_memory_size", buf,

@@ -263,6 +263,7 @@ WALOpenSegmentInit(WALOpenSegment *seg, WALSegmentContext *segcxt,
 void
 XLogBeginRead(XLogReaderState *state, XLogRecPtr RecPtr)
 {
+    /*设置起始位置*/
 	Assert(!XLogRecPtrIsInvalid(RecPtr));
 
 	ResetDecoder(state);
@@ -588,8 +589,9 @@ restart:
 	state->currRecPtr = RecPtr;
 	assembled = false;
 
+	/*取页位置*/
 	targetPagePtr = RecPtr - (RecPtr % XLOG_BLCKSZ);
-	targetRecOff = RecPtr % XLOG_BLCKSZ;
+	targetRecOff = RecPtr % XLOG_BLCKSZ;/*在页内的偏移量*/
 
 	/*
 	 * Read the page containing the record into state->readBuf. Request enough
@@ -656,6 +658,7 @@ restart:
 	 */
 	if (targetRecOff <= XLOG_BLCKSZ - SizeOfXLogRecord)
 	{
+	    /*校验log record header*/
 		if (!ValidXLogRecordHeader(state, RecPtr, state->DecodeRecPtr, record,
 								   randAccess))
 			goto err;
@@ -969,7 +972,7 @@ XLogReadAhead(XLogReaderState *state, bool nonblocking)
  * data and if there hasn't been any error since caching the data.
  */
 static int
-ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
+ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr/*要读取的页指针*/, int reqLen)
 {
 	int			readLen;
 	uint32		targetPageOff;
@@ -1002,19 +1005,22 @@ ReadPageInternal(XLogReaderState *state, XLogRecPtr pageptr, int reqLen)
 	{
 		XLogRecPtr	targetSegmentPtr = pageptr - targetPageOff;
 
+		/*读取一页内容*/
 		readLen = state->routine.page_read(state, targetSegmentPtr, XLOG_BLCKSZ,
 										   state->currRecPtr,
-										   state->readBuf);
+										   state->readBuf/*填充内存*/);
 		if (readLen == XLREAD_WOULDBLOCK)
 			return XLREAD_WOULDBLOCK;
 		else if (readLen < 0)
+		    /*读取失败*/
 			goto err;
 
 		/* we can be sure to have enough WAL available, we scrolled back */
-		Assert(readLen == XLOG_BLCKSZ);
+		Assert(readLen == XLOG_BLCKSZ);/*读取足量的长度*/
 
+		/*page header校验*/
 		if (!XLogReaderValidatePageHeader(state, targetSegmentPtr,
-										  state->readBuf))
+										  state->readBuf/*读取的内容*/))
 			goto err;
 	}
 
@@ -1193,6 +1199,7 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 	XLogRecPtr	recaddr;
 	XLogSegNo	segno;
 	int32		offset;
+	/*指向log page header*/
 	XLogPageHeader hdr = (XLogPageHeader) phdr;
 
 	Assert((recptr % XLOG_BLCKSZ) == 0);
@@ -1202,6 +1209,7 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 
 	XLogSegNoOffsetToRecPtr(segno, offset, state->segcxt.ws_segsize, recaddr);
 
+	/*magic校验*/
 	if (hdr->xlp_magic != XLOG_PAGE_MAGIC)
 	{
 		char		fname[MAXFNAMELEN];
@@ -1216,6 +1224,7 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 		return false;
 	}
 
+	/*info flags包含不认识的flags*/
 	if ((hdr->xlp_info & ~XLP_ALL_FLAGS) != 0)
 	{
 		char		fname[MAXFNAMELEN];
@@ -1230,6 +1239,7 @@ XLogReaderValidatePageHeader(XLogReaderState *state, XLogRecPtr recptr,
 		return false;
 	}
 
+	/*包含LONG HEADER，则为XLogLongPageHeader类型的header*/
 	if (hdr->xlp_info & XLP_LONG_HEADER)
 	{
 		XLogLongPageHeader longhdr = (XLogLongPageHeader) hdr;

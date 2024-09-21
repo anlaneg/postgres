@@ -323,6 +323,7 @@ checkDataDir(void)
 
 	if (stat(DataDir, &stat_buf) != 0)
 	{
+	    /*DataDir目录获取stat时出错，报错*/
 		if (errno == ENOENT)
 			ereport(FATAL,
 					(errcode_for_file_access(),
@@ -337,6 +338,7 @@ checkDataDir(void)
 
 	/* eventual chdir would fail anyway, but let's test ... */
 	if (!S_ISDIR(stat_buf.st_mode))
+	    /*DataDir不为目录，报错*/
 		ereport(FATAL,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("specified data directory \"%s\" is not a directory",
@@ -353,6 +355,7 @@ checkDataDir(void)
 	 */
 #if !defined(WIN32) && !defined(__CYGWIN__)
 	if (stat_buf.st_uid != geteuid())
+	    /*此目录的ownership不正确*/
 		ereport(FATAL,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("data directory \"%s\" has wrong ownership",
@@ -400,7 +403,7 @@ checkDataDir(void)
 #endif
 
 	/* Check for PG_VERSION */
-	ValidatePgVersion(DataDir);
+	ValidatePgVersion(DataDir);/*校验PG_VERSION版本*/
 }
 
 /*
@@ -418,6 +421,7 @@ SetDataDir(const char *dir)
 	new = make_absolute_path(dir);
 
 	free(DataDir);
+	/*设置data目录*/
 	DataDir = new;
 }
 
@@ -432,6 +436,7 @@ ChangeToDataDir(void)
 {
 	AssertState(DataDir);
 
+	/*切换工作目录到DataDir*/
 	if (chdir(DataDir) < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
@@ -988,7 +993,7 @@ UnlinkLockFiles(int status, Datum arg)
 static void
 CreateLockFile(const char *filename, bool amPostmaster,
 			   const char *socketDir,
-			   bool isDDLock, const char *refName)
+			   bool isDDLock/*是否data dir lock file*/, const char *refName)
 {
 	int			fd;
 	char		buffer[MAXPGPATH * 2 + 256];
@@ -1053,6 +1058,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 		 */
 		fd = open(filename, O_RDWR | O_CREAT | O_EXCL, pg_file_create_mode);
 		if (fd >= 0)
+		    /*文件打开成功，跳出*/
 			break;				/* Success; exit the retry loop */
 
 		/*
@@ -1095,6 +1101,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 					 errhint("Either another server is starting, or the lock file is the remnant of a previous server startup crash.")));
 		}
 
+		/*以只读方式打开lock file,此时读到的是pid,这个pid可能是旧进程的*/
 		buffer[len] = '\0';
 		encoded_pid = atoi(buffer);
 
@@ -1130,6 +1137,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 		if (other_pid != my_pid && other_pid != my_p_pid &&
 			other_pid != my_gp_pid)
 		{
+		    /*测试向这个进程发送信号，如果返回的非ESRCH，则进程还存活*/
 			if (kill(other_pid, 0) == 0 ||
 				(errno != ESRCH && errno != EPERM))
 			{
@@ -1196,6 +1204,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 		 * would-be creators.
 		 */
 		if (unlink(filename) < 0)
+		    /*移除旧的lock file失败*/
 			ereport(FATAL,
 					(errcode_for_file_access(),
 					 errmsg("could not remove old lock file \"%s\": %m",
@@ -1229,6 +1238,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_WRITE);
 	if (write(fd, buffer, strlen(buffer)) != strlen(buffer))
 	{
+	    /*写lock file失败*/
 		int			save_errno = errno;
 
 		close(fd);
@@ -1244,6 +1254,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 	pgstat_report_wait_start(WAIT_EVENT_LOCK_FILE_CREATE_SYNC);
 	if (pg_fsync(fd) != 0)
 	{
+	    /*使数据落盘失败*/
 		int			save_errno = errno;
 
 		close(fd);
@@ -1256,6 +1267,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 	pgstat_report_wait_end();
 	if (close(fd) != 0)
 	{
+	    /*关闭fd失败*/
 		int			save_errno = errno;
 
 		unlink(filename);
@@ -1271,6 +1283,7 @@ CreateLockFile(const char *filename, bool amPostmaster,
 	 * to the list of files to unlink.
 	 */
 	if (lock_files == NIL)
+	    /*指明进程退出时，移除此文件*/
 		on_proc_exit(UnlinkLockFiles, 0);
 
 	/*
@@ -1293,7 +1306,8 @@ CreateLockFile(const char *filename, bool amPostmaster,
 void
 CreateDataDirLockFile(bool amPostmaster)
 {
-	CreateLockFile(DIRECTORY_LOCK_FILE, amPostmaster, "", true, DataDir);
+    /*创建目录锁*/
+	CreateLockFile(DIRECTORY_LOCK_FILE/*文件锁名称*/, amPostmaster, "", true, DataDir);
 }
 
 /*
@@ -1305,6 +1319,7 @@ CreateSocketLockFile(const char *socketfile, bool amPostmaster,
 {
 	char		lockfile[MAXPGPATH];
 
+	/*创建socket lock file*/
 	snprintf(lockfile, sizeof(lockfile), "%s.lock", socketfile);
 	CreateLockFile(lockfile, amPostmaster, socketDir, false, socketfile);
 }
@@ -1557,14 +1572,17 @@ ValidatePgVersion(const char *path)
 	char		file_version_string[64];
 	const char *my_version_string = PG_VERSION;
 
+	/*程序对应的pg版本*/
 	my_major = strtol(my_version_string, &endptr, 10);
 
+	/*构造PG_VERSION文件*/
 	snprintf(full_path, sizeof(full_path), "%s/PG_VERSION", path);
 
 	file = AllocateFile(full_path, "r");
 	if (!file)
 	{
 		if (errno == ENOENT)
+		    /*文件不存在*/
 			ereport(FATAL,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("\"%s\" is not a valid data directory",
@@ -1576,11 +1594,13 @@ ValidatePgVersion(const char *path)
 					 errmsg("could not open file \"%s\": %m", full_path)));
 	}
 
+	/*取文件内容，转换major*/
 	file_version_string[0] = '\0';
 	ret = fscanf(file, "%63s", file_version_string);
 	file_major = strtol(file_version_string, &endptr, 10);
 
 	if (ret != 1 || endptr == file_version_string)
+	    /*数据格式有误*/
 		ereport(FATAL,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"%s\" is not a valid data directory",
@@ -1592,6 +1612,7 @@ ValidatePgVersion(const char *path)
 	FreeFile(file);
 
 	if (my_major != file_major)
+	    /*版本不一致，报错*/
 		ereport(FATAL,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("database files are incompatible with server"),
@@ -1642,6 +1663,7 @@ load_libraries(const char *libraries, const char *gucname, bool restricted)
 	/* Parse string into list of filename paths */
 	if (!SplitDirectoriesString(rawstring, ',', &elemlist))
 	{
+	    /*split时出错*/
 		/* syntax error in list */
 		list_free_deep(elemlist);
 		pfree(rawstring);
@@ -1652,6 +1674,7 @@ load_libraries(const char *libraries, const char *gucname, bool restricted)
 		return;
 	}
 
+	/*遍历elemlist中的每一个library*/
 	foreach(l, elemlist)
 	{
 		/* Note that filename was already canonicalized */
@@ -1661,9 +1684,11 @@ load_libraries(const char *libraries, const char *gucname, bool restricted)
 		/* If restricting, insert $libdir/plugins if not mentioned already */
 		if (restricted && first_dir_separator(filename) == NULL)
 		{
+		    /*filename 不是绝对地址，增加路径前缀*/
 			expanded = psprintf("$libdir/plugins/%s", filename);
 			filename = expanded;
 		}
+		/*加载plugin*/
 		load_file(filename, restricted);
 		ereport(DEBUG1,
 				(errmsg_internal("loaded library \"%s\"", filename)));
@@ -1682,6 +1707,7 @@ void
 process_shared_preload_libraries(void)
 {
 	process_shared_preload_libraries_in_progress = true;
+	/*加载libraries*/
 	load_libraries(shared_preload_libraries_string,
 				   "shared_preload_libraries",
 				   false);

@@ -540,6 +540,7 @@ static void ShmemBackendArrayAdd(Backend *bn);
 static void ShmemBackendArrayRemove(Backend *bn);
 #endif							/* EXEC_BACKEND */
 
+/*创建start up进程*/
 #define StartupDataBase()		StartChildProcess(StartupProcess)
 #define StartArchiver()			StartChildProcess(ArchiverProcess)
 #define StartBackgroundWriter() StartChildProcess(BgWriterProcess)
@@ -952,6 +953,7 @@ PostmasterMain(int argc, char *argv[])
 	 */
 	if (!CheckDateTokenTables())
 	{
+	    /*date token表检查未通过*/
 		write_stderr("%s: invalid datetoken tables, please fix\n", progname);
 		ExitPostmaster(1);
 	}
@@ -975,6 +977,7 @@ PostmasterMain(int argc, char *argv[])
 								 progname)));
 		ereport(DEBUG3,
 				(errmsg_internal("-----------------------------------------")));
+		/*显示环境变量*/
 		for (p = environ; *p; ++p)
 			ereport(DEBUG3,
 					(errmsg_internal("\t%s", *p)));
@@ -1195,8 +1198,10 @@ PostmasterMain(int argc, char *argv[])
 	 * charged with closing the sockets again at postmaster shutdown.
 	 */
 	for (i = 0; i < MAXLISTEN; i++)
+	    /*初始化listen socket*/
 		ListenSocket[i] = PGINVALID_SOCKET;
 
+	/*标记进程退出时，需要关闭*/
 	on_proc_exit(CloseServerPorts, 0);
 
 	if (ListenAddresses)
@@ -1219,16 +1224,19 @@ PostmasterMain(int argc, char *argv[])
 							"listen_addresses")));
 		}
 
+		/*遍历需要监听的地址列表*/
 		foreach(l, elemlist)
 		{
 			char	   *curhost = (char *) lfirst(l);
 
 			if (strcmp(curhost, "*") == 0)
+			    /*监听任意地址*/
 				status = StreamServerPort(AF_UNSPEC, NULL,
-										  (unsigned short) PostPortNumber,
+										  (unsigned short) PostPortNumber/*监听的端口号*/,
 										  NULL,
-										  ListenSocket, MAXLISTEN);
+										  ListenSocket/*出参，打开的监听fd*/, MAXLISTEN);
 			else
+			    /*监听指定地址*/
 				status = StreamServerPort(AF_UNSPEC, curhost,
 										  (unsigned short) PostPortNumber,
 										  NULL,
@@ -1236,6 +1244,7 @@ PostmasterMain(int argc, char *argv[])
 
 			if (status == STATUS_OK)
 			{
+			    /*监听成功*/
 				success++;
 				/* record the first successful host addr in lockfile */
 				if (!listen_addr_saved)
@@ -1351,6 +1360,7 @@ PostmasterMain(int argc, char *argv[])
 	 * check that we have some socket to listen on
 	 */
 	if (ListenSocket[0] == PGINVALID_SOCKET)
+	    /*一个listen socket也没有，报错*/
 		ereport(FATAL,
 				(errmsg("no socket created for listening")));
 
@@ -1465,7 +1475,7 @@ PostmasterMain(int argc, char *argv[])
 	/*
 	 * We're ready to rock and roll...
 	 */
-	StartupPID = StartupDataBase();
+	StartupPID = StartupDataBase();/*启动start up进程*/
 	Assert(StartupPID != 0);
 	StartupStatus = STARTUP_RUNNING;
 	pmState = PM_STARTUP;
@@ -1473,6 +1483,7 @@ PostmasterMain(int argc, char *argv[])
 	/* Some workers may be scheduled to start now */
 	maybe_start_bgworkers();
 
+	/*进入server loop*/
 	status = ServerLoop();
 
 	/*
@@ -1597,6 +1608,7 @@ checkControlFile(void)
 
 	snprintf(path, sizeof(path), "%s/global/pg_control", DataDir);
 
+	/*检查pg_control文件是否存在*/
 	fp = AllocateFile(path, PG_BINARY_R);
 	if (fp == NULL)
 	{
@@ -1604,6 +1616,7 @@ checkControlFile(void)
 					 "Expected to find it in the directory \"%s\",\n"
 					 "but could not open file \"%s\": %s\n",
 					 progname, DataDir, path, strerror(errno));
+		/*文件不存在，退出*/
 		ExitPostmaster(2);
 	}
 	FreeFile(fp);
@@ -2647,6 +2660,7 @@ ClosePostmasterPorts(bool am_syslogger)
 	{
 		if (ListenSocket[i] != PGINVALID_SOCKET)
 		{
+		    /*关闭listen socket*/
 			StreamClose(ListenSocket[i]);
 			ListenSocket[i] = PGINVALID_SOCKET;
 		}
@@ -5399,6 +5413,7 @@ StartChildProcess(AuxProcType type)
 
 	if (pid == 0)				/* child */
 	{
+	    /*子进程处理*/
 		InitPostmasterChild();
 
 		/* Close the postmaster's sockets */
@@ -5415,6 +5430,7 @@ StartChildProcess(AuxProcType type)
 
 	if (pid < 0)
 	{
+	    /*子进程fork失败*/
 		/* in parent, fork failed */
 		int			save_errno = errno;
 

@@ -122,6 +122,7 @@ static char **save_argv;
 char	  **
 save_ps_display_args(int argc, char **argv)
 {
+    /*保存argc,argv*/
 	save_argc = argc;
 	save_argv = argv;
 
@@ -255,6 +256,7 @@ init_ps_display(const char *fixed_part)
 
 	Assert(fixed_part || MyBackendType);
 	if (!fixed_part)
+	    /*backend  type转为字符串*/
 		fixed_part = GetBackendTypeDesc(MyBackendType);
 
 #ifndef PS_USE_NONE

@@ -270,7 +270,7 @@ pgstat_report_wait_start(uint32 wait_event_info)
 	 * Since this is a four-byte field which is always read and written as
 	 * four-bytes, updates are atomic.
 	 */
-	*(volatile uint32 *) my_wait_event_info = wait_event_info;
+	*(volatile uint32 *) my_wait_event_info = wait_event_info;/*指明当前执行阶段*/
 }
 
 /* ----------

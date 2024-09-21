@@ -1576,6 +1576,7 @@ GetCurrentTimestamp(void)
 	TimestampTz result;
 	struct timeval tp;
 
+	/*取当前时间*/
 	gettimeofday(&tp, NULL);
 
 	result = (TimestampTz) tp.tv_sec -

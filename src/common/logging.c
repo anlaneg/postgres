@@ -99,6 +99,7 @@ pg_logging_init(const char *argv0)
 	/* usually the default, but not on Windows */
 	setvbuf(stderr, NULL, _IONBF, 0);
 
+	/*可执行程序名称*/
 	progname = get_progname(argv0);
 	__pg_log_level = PG_LOG_INFO;
 

@@ -105,6 +105,7 @@ first_dir_separator(const char *filename)
 {
 	const char *p;
 
+	/*返回filename中首个目录分隔符*/
 	for (p = skip_drive(filename); *p; p++)
 		if (IS_DIR_SEP(*p))
 			return unconstify(char *, p);
@@ -141,9 +142,13 @@ last_dir_separator(const char *filename)
 	const char *p,
 			   *ret = NULL;
 
+	/*记录最后一个文件夹分隔符*/
 	for (p = skip_drive(filename); *p; p++)
 		if (IS_DIR_SEP(*p))
+		    /*遇到文件夹分隔符，记录文件夹分隔分起始地址*/
 			ret = p;
+
+	/*返回最后一个文件夹分隔符*/
 	return unconstify(char *, ret);
 }
 
@@ -220,6 +225,7 @@ join_path_components(char *ret_path,
 					 const char *head, const char *tail)
 {
 	if (ret_path != head)
+	    /*先填写ret_path*/
 		strlcpy(ret_path, head, MAXPGPATH);
 
 	/*
@@ -578,8 +584,10 @@ get_progname(const char *argv0)
 
 	nodir_name = last_dir_separator(argv0);
 	if (nodir_name)
+	    /*跳过文件分隔符，指向最后一层文件名称*/
 		nodir_name++;
 	else
+	    /*argv0中没有包含文件分隔符，使用argv0*/
 		nodir_name = skip_drive(argv0);
 
 	/*
@@ -589,6 +597,7 @@ get_progname(const char *argv0)
 	progname = strdup(nodir_name);
 	if (progname == NULL)
 	{
+	    /*申请内存失败*/
 		fprintf(stderr, "%s: out of memory\n", nodir_name);
 		abort();				/* This could exit the postmaster */
 	}
@@ -600,6 +609,7 @@ get_progname(const char *argv0)
 		progname[strlen(progname) - (sizeof(EXE) - 1)] = '\0';
 #endif
 
+	/*返回程序名称*/
 	return progname;
 }
 
@@ -673,11 +683,15 @@ make_relative_path(char *ret_path, const char *target_path,
 	for (i = 0; target_path[i] && bin_path[i]; i++)
 	{
 		if (IS_DIR_SEP(target_path[i]) && IS_DIR_SEP(bin_path[i]))
+		    /*i位置均为目录分隔符，prefix_len增加*/
 			prefix_len = i + 1;
 		else if (target_path[i] != bin_path[i])
+		    /*不相等，跳出*/
 			break;
+		/*相等，继续匹配*/
 	}
 	if (prefix_len == 0)
+	    /*无公共的prefix*/
 		goto no_match;			/* no common prefix? */
 	tail_len = strlen(bin_path) - prefix_len;
 
@@ -686,6 +700,7 @@ make_relative_path(char *ret_path, const char *target_path,
 	 * canonicalize to simplify comparison to bin_path.
 	 */
 	strlcpy(ret_path, my_exec_path, MAXPGPATH);
+	/*移除可执行程序名称*/
 	trim_directory(ret_path);	/* remove my executable name */
 	canonicalize_path(ret_path);
 
@@ -998,19 +1013,21 @@ trim_directory(char *path)
 	path = skip_drive(path);
 
 	if (path[0] == '\0')
+	    /*path为空*/
 		return path;
 
 	/* back up over trailing slash(es) */
 	for (p = path + strlen(path) - 1; IS_DIR_SEP(*p) && p > path; p--)
-		;
+		;/*忽略掉尾部的‘/’*/
 	/* back up over directory name */
 	for (; !IS_DIR_SEP(*p) && p > path; p--)
-		;
+		;/*向上到上一层目录*/
 	/* if multiple slashes before directory name, remove 'em all */
 	for (; p > path && IS_DIR_SEP(*(p - 1)); p--)
-		;
+		;/*上一层目录后结尾可能有多个‘/’，忽略掉*/
 	/* don't erase a leading slash */
 	if (p == path && IS_DIR_SEP(*p))
+	    /*如果已达到顶层，则不能移除‘/’*/
 		p++;
 	*p = '\0';
 	return p;
@@ -1030,6 +1047,7 @@ trim_trailing_separator(char *path)
 	path = skip_drive(path);
 	p = path + strlen(path);
 	if (p > path)
+	    /*移除字符串结尾多余的’/‘*/
 		for (p--; p > path && IS_DIR_SEP(*p); p--)
 			*p = '\0';
 }

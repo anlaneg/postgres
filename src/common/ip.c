@@ -53,7 +53,7 @@ static int	getnameinfo_unix(const struct sockaddr_un *sa, int salen,
  */
 int
 pg_getaddrinfo_all(const char *hostname, const char *servname,
-				   const struct addrinfo *hintp, struct addrinfo **result)
+				   const struct addrinfo *hintp, struct addrinfo **result/*出参，地址信息*/)
 {
 	int			rc;
 
@@ -126,6 +126,7 @@ pg_getnameinfo_all(const struct sockaddr_storage *addr, int salen,
 							  service, servicelen,
 							  flags);
 	else
+		/*格式化地址为字符串*/
 		rc = getnameinfo((const struct sockaddr *) addr, salen,
 						 node, nodelen,
 						 service, servicelen,

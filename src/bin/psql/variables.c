@@ -25,6 +25,7 @@ valid_variable_name(const char *name)
 
 	/* Mustn't be zero-length */
 	if (*ptr == '\0')
+	    /*变量名称长度不能为0*/
 		return false;
 
 	while (*ptr)
@@ -32,6 +33,7 @@ valid_variable_name(const char *name)
 		if (IS_HIGHBIT_SET(*ptr) ||
 			strchr("ABCDEFGHIJKLMNOPQRSTUVWXYZ" "abcdefghijklmnopqrstuvwxyz"
 				   "_0123456789", *ptr) != NULL)
+		    /*数字，字每下划线，且容许高位被置1的字符*/
 			ptr++;
 		else
 			return false;
@@ -208,7 +210,7 @@ PrintVariables(VariableSpace space)
  * space or name being NULL.
  */
 bool
-SetVariable(VariableSpace space, const char *name, const char *value)
+SetVariable(VariableSpace space, const char *name/*变量名称*/, const char *value)
 {
 	struct _variable *current,
 			   *previous;
@@ -216,6 +218,7 @@ SetVariable(VariableSpace space, const char *name, const char *value)
 	if (!space || !name)
 		return false;
 
+	/*检查name是否有效*/
 	if (!valid_variable_name(name))
 	{
 		/* Deletion of non-existent variable is not an error */
@@ -277,6 +280,7 @@ SetVariable(VariableSpace space, const char *name, const char *value)
 			return confirmed;
 		}
 		if (cmp > 0)
+		    /*没有找到此name的变量*/
 			break;				/* it's not there */
 	}
 

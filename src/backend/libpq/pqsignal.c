@@ -139,6 +139,7 @@ pqsignal_pm(int signo, pqsigfunc func)
 	if (signo == SIGCHLD)
 		act.sa_flags |= SA_NOCLDSTOP;
 #endif
+	/*注册信号处理函数*/
 	if (sigaction(signo, &act, &oact) < 0)
 		return SIG_ERR;
 	return oact.sa_handler;

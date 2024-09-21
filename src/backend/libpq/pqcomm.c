@@ -313,7 +313,7 @@ socket_close(int code, Datum arg)
  */
 
 int
-StreamServerPort(int family, const char *hostName, unsigned short portNumber,
+StreamServerPort(int family, const char *hostName/*要监听的地址*/, unsigned short portNumber,
 				 const char *unixSocketDir,
 				 pgsocket ListenSocket[], int MaxListen)
 {
@@ -364,6 +364,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 	}
 	else
 	{
+	    /*格式化端口号*/
 		snprintf(portNumberStr, sizeof(portNumberStr), "%d", portNumber);
 		service = portNumberStr;
 	}
@@ -371,6 +372,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 	ret = pg_getaddrinfo_all(hostName, service, &hint, &addrs);
 	if (ret || !addrs)
 	{
+	    /*取地址信息失败*/
 		if (hostName)
 			ereport(LOG,
 					(errmsg("could not translate host name \"%s\", service \"%s\" to address: %s",
@@ -399,10 +401,12 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 		for (; listen_index < MaxListen; listen_index++)
 		{
 			if (ListenSocket[listen_index] == PGINVALID_SOCKET)
+			    /*取个空闲的listen socket*/
 				break;
 		}
 		if (listen_index >= MaxListen)
 		{
+		    /*没有空闲的listen socket了*/
 			ereport(LOG,
 					(errmsg("could not bind to all requested addresses: MAXLISTEN (%d) exceeded",
 							MaxListen)));
@@ -413,6 +417,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 		switch (addr->ai_family)
 		{
 			case AF_INET:
+			    /*ipv4地址*/
 				familyDesc = _("IPv4");
 				break;
 #ifdef HAVE_IPV6
@@ -424,6 +429,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 				familyDesc = _("Unix");
 				break;
 			default:
+			    /*遇到其它不认识的地址*/
 				snprintf(familyDescBuf, sizeof(familyDescBuf),
 						 _("unrecognized address family %d"),
 						 addr->ai_family);
@@ -444,6 +450,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 			addrDesc = addrBuf;
 		}
 
+		/*创建socket*/
 		if ((fd = socket(addr->ai_family, SOCK_STREAM, 0)) == PGINVALID_SOCKET)
 		{
 			ereport(LOG,
@@ -469,6 +476,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 		 */
 		if (addr->ai_family != AF_UNIX)
 		{
+		    /*设置reuse,防止快速重启*/
 			if ((setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
 							(char *) &one, sizeof(one))) == -1)
 			{
@@ -508,7 +516,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 		 * ipv4 addresses to ipv6.  It will show ::ffff:ipv4 for all ipv4
 		 * connections.
 		 */
-		err = bind(fd, addr->ai_addr, addr->ai_addrlen);
+		err = bind(fd, addr->ai_addr, addr->ai_addrlen);/*绑定地址及端口*/
 		if (err < 0)
 		{
 			int			saved_errno = errno;
@@ -547,6 +555,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 		if (maxconn > PG_SOMAXCONN)
 			maxconn = PG_SOMAXCONN;
 
+		/*设置backlog*/
 		err = listen(fd, maxconn);
 		if (err < 0)
 		{
@@ -569,6 +578,7 @@ StreamServerPort(int family, const char *hostName, unsigned short portNumber,
 					(errmsg("listening on %s address \"%s\", port %d",
 							familyDesc, addrDesc, (int) portNumber)));
 
+		/*记录打开的listen socket*/
 		ListenSocket[listen_index] = fd;
 		added++;
 	}

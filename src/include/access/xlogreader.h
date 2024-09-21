@@ -264,7 +264,7 @@ struct XLogReaderState
 	 * Buffer for currently read page (XLOG_BLCKSZ bytes, valid up to at least
 	 * readLen bytes)
 	 */
-	char	   *readBuf;
+	char	   *readBuf;/*保存读取的内容*/
 	uint32		readLen;
 
 	/* last read XLOG position for data currently in readBuf */
@@ -280,7 +280,7 @@ struct XLogReaderState
 	TimeLineID	latestPageTLI;
 
 	/* beginning of the WAL record being read. */
-	XLogRecPtr	currRecPtr;
+	XLogRecPtr	currRecPtr;/*当前读取位置*/
 	/* timeline to read it from, 0 if a lookup is required */
 	TimeLineID	currTLI;
 

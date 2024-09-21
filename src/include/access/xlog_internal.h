@@ -73,6 +73,7 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 /* When record crosses page boundary, set this flag in new page's header */
 #define XLP_FIRST_IS_CONTRECORD		0x0001
 /* This flag indicates a "long" page header */
+/*指明是否为XLogLongPageHeader类型的header*/
 #define XLP_LONG_HEADER				0x0002
 /* This flag indicates backup blocks starting in this page are optional */
 #define XLP_BKP_REMOVABLE			0x0004
@@ -81,6 +82,7 @@ typedef XLogLongPageHeaderData *XLogLongPageHeader;
 /* All defined flag bits in xlp_info (used for validity checking of header) */
 #define XLP_ALL_FLAGS				0x000F
 
+/*返回header长度*/
 #define XLogPageHeaderSize(hdr)		\
 	(((hdr)->xlp_info & XLP_LONG_HEADER) ? SizeOfXLogLongPHD : SizeOfXLogShortPHD)
 

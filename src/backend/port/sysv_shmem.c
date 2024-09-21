@@ -433,6 +433,7 @@ PGSharedMemoryAttach(IpcMemoryId shmId,
 	}
 	*addr = hdr;
 
+	/*magic不正确，报错*/
 	if (hdr->magic != PGShmemMagic ||
 		hdr->device != statbuf.st_dev ||
 		hdr->inode != statbuf.st_ino)
@@ -505,6 +506,7 @@ GetHugePageSize(Size *hugepagesize, int *mmap_flags)
 				{
 					if (ch == 'k')
 					{
+					    /*取默认大页大小*/
 						default_hugepagesize = sz * (Size) 1024;
 						break;
 					}
